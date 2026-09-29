@@ -3,6 +3,7 @@ import frappe
 
 SOURCE_PRICE_LIST = "Standard Buying"
 
+
 TARGET_PRICE_LISTS = {
     "B2B WHOLESALE",
     "SALOON",
@@ -20,8 +21,7 @@ def trigger_from_pricing_rule(doc, method=None):
 
     Customer Group is intentionally ignored.
 
-    The Price List determines whether this is one of our
-    custom Pricing Rules.
+    Only our three target Price Lists trigger the custom process.
     """
 
     if not doc:
@@ -44,10 +44,14 @@ def trigger_from_pricing_rule(doc, method=None):
 # BACKGROUND PRICING RULE PROCESSOR
 # ----------------------------------------------------------------------
 
-def process_pricing_rule_background(pricing_rule_name):
+def process_pricing_rule_background(
+    pricing_rule_name
+):
     """
-    Reload the committed Pricing Rule and find affected
-    Standard Buying Item Prices.
+    Reload the committed Pricing Rule.
+
+    Find affected Standard Buying Item Prices and enqueue them
+    for recalculation.
     """
 
     if not frappe.db.exists(
@@ -64,29 +68,41 @@ def process_pricing_rule_background(pricing_rule_name):
     if rule.for_price_list not in TARGET_PRICE_LISTS:
         return
 
-    item_codes = get_affected_item_codes(rule)
+    item_codes = get_affected_item_codes(
+        rule
+    )
 
+    # None means the rule affects all items.
     if item_codes is None:
-        # None means the rule affects all items.
+
         source_prices = frappe.get_all(
             "Item Price",
             filters={
                 "price_list": SOURCE_PRICE_LIST,
             },
             pluck="name",
+            ignore_permissions=True,
+            limit_page_length=0,
         )
 
     elif not item_codes:
+
         return
 
     else:
+
         source_prices = frappe.get_all(
             "Item Price",
             filters={
                 "price_list": SOURCE_PRICE_LIST,
-                "item_code": ["in", list(item_codes)],
+                "item_code": [
+                    "in",
+                    list(item_codes),
+                ],
             },
             pluck="name",
+            ignore_permissions=True,
+            limit_page_length=0,
         )
 
     for item_price_name in source_prices:
@@ -102,7 +118,7 @@ def process_pricing_rule_background(pricing_rule_name):
 
 
 # ----------------------------------------------------------------------
-# FIND ITEMS AFFECTED BY THE PRICING RULE
+# FIND AFFECTED ITEMS
 # ----------------------------------------------------------------------
 
 def get_affected_item_codes(rule):
@@ -113,7 +129,7 @@ def get_affected_item_codes(rule):
             for Item Code / Item Group / Brand rules
 
         None
-            for All Item Groups / Transaction rules
+            when the rule affects all items.
 
     Customer Group is never considered.
     """
@@ -134,6 +150,8 @@ def get_affected_item_codes(rule):
             fields=[
                 "item_code",
             ],
+            ignore_permissions=True,
+            limit_page_length=0,
         )
 
         return {
@@ -156,6 +174,8 @@ def get_affected_item_codes(rule):
             fields=[
                 "item_group",
             ],
+            ignore_permissions=True,
+            limit_page_length=0,
         )
 
         groups = {
@@ -164,20 +184,26 @@ def get_affected_item_codes(rule):
             if row.item_group
         }
 
-        # All Item Groups = default / all items.
+        # All Item Groups = default/all items.
         if "All Item Groups" in groups:
             return None
 
+        # No group specified = treat as all items.
         if not groups:
             return None
 
         items = frappe.get_all(
             "Item",
             filters={
-                "item_group": ["in", list(groups)],
+                "item_group": [
+                    "in",
+                    list(groups),
+                ],
                 "disabled": 0,
             },
             pluck="name",
+            ignore_permissions=True,
+            limit_page_length=0,
         )
 
         return set(items)
@@ -196,6 +222,8 @@ def get_affected_item_codes(rule):
             fields=[
                 "brand",
             ],
+            ignore_permissions=True,
+            limit_page_length=0,
         )
 
         brands = {
@@ -210,10 +238,15 @@ def get_affected_item_codes(rule):
         items = frappe.get_all(
             "Item",
             filters={
-                "brand": ["in", list(brands)],
+                "brand": [
+                    "in",
+                    list(brands),
+                ],
                 "disabled": 0,
             },
             pluck="name",
+            ignore_permissions=True,
+            limit_page_length=0,
         )
 
         return set(items)
