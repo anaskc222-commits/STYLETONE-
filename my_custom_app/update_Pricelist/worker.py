@@ -35,6 +35,9 @@ def process_b2b_price_background(
         if buying_rate <= 0:
             return
 
+        # --------------------------------------------------------
+        # ITEM DATA
+        # --------------------------------------------------------
         item_data = frappe.db.get_value(
             "Item",
             item_code,
@@ -48,6 +51,9 @@ def process_b2b_price_background(
         item_group = item_data.item_group or ""
         brand = item_data.brand or ""
 
+        # --------------------------------------------------------
+        # PRICING RULES
+        # --------------------------------------------------------
         rules = frappe.db.sql(
             """
             SELECT
@@ -74,6 +80,9 @@ def process_b2b_price_background(
 
         matched_rules = []
 
+        # --------------------------------------------------------
+        # MATCH RULES
+        # --------------------------------------------------------
         for rule in rules:
             apply_on = rule.apply_on
             rule_name = rule.name
@@ -118,6 +127,9 @@ def process_b2b_price_background(
         if not matched_rules:
             return
 
+        # --------------------------------------------------------
+        # WINNING RULE
+        # --------------------------------------------------------
         def sort_key(rule):
             try:
                 priority = int(rule.priority or 0)
@@ -147,6 +159,9 @@ def process_b2b_price_background(
 
         b2b_rate = round(buying_rate * (1 + margin / 100.0), 6)
 
+        # --------------------------------------------------------
+        # FIND & UPDATE / CREATE ITEM PRICE
+        # --------------------------------------------------------
         existing = frappe.db.get_value(
             "Item Price",
             {
