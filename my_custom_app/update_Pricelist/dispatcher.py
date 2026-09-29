@@ -1,9 +1,23 @@
 import frappe
 
 
-B2B_PRICE_LIST = "B2B WHOLESALE"
 SOURCE_PRICE_LIST = "Standard Buying"
-B2B_CUSTOMER_GROUP = "Wholesale Store Clients"
+
+
+PRICE_TARGETS = [
+    {
+        "customer_group": "Wholesale Store Clients",
+        "price_list": "B2B WHOLESALE",
+    },
+    {
+        "customer_group": "Saloon",
+        "price_list": "SALOON",
+    },
+    {
+        "customer_group": "Beauty Parlour",
+        "price_list": "BEAUTY PARLOUR",
+    },
+]
 
 
 RULE_SPECIFICITY = {
@@ -16,29 +30,44 @@ RULE_SPECIFICITY = {
 }
 
 
+# ============================================================
+# ITEM PRICE EVENT
+# ============================================================
+
 def on_item_price_change(doc, method=None):
     """
-    Lightweight Item Price event handler.
+    Handles Standard Buying Item Price creation/update.
 
-    Only Standard Buying prices are processed.
-    B2B output prices are ignored.
+    Only Standard Buying is used as the source.
 
-    The actual pricing calculation runs in the background.
+    Target price lists:
+        - B2B WHOLESALE
+        - SALOON
+        - BEAUTY PARLOUR
+
+    Retail is intentionally not handled here.
     """
 
-    if not doc or not doc.item_code:
+    if not doc:
         return
 
-    # Never process generated B2B prices.
-    if doc.price_list == B2B_PRICE_LIST:
+    if not doc.item_code:
         return
 
-    # Ignore every other price list.
+    # Never process any custom target price list as a source.
+    target_price_lists = {
+        target["price_list"]
+        for target in PRICE_TARGETS
+    }
+
+    if doc.price_list in target_price_lists:
+        return
+
+    # Only Standard Buying is our source.
     if doc.price_list != SOURCE_PRICE_LIST:
         return
 
-    # On update, only enqueue when pricing-relevant
-    # fields actually changed.
+    # On update, process only pricing-relevant changes.
     if method == "on_update":
         relevant_fields = (
             "price_list_rate",
@@ -53,7 +82,6 @@ def on_item_price_change(doc, method=None):
         ):
             return
 
-    # Validate source buying rate.
     try:
         buying_rate = float(doc.price_list_rate or 0)
     except (TypeError, ValueError):
@@ -62,8 +90,17 @@ def on_item_price_change(doc, method=None):
     if buying_rate <= 0:
         return
 
-    # Pass only the Item Price name.
-    # The worker reloads the latest committed record.
+    enqueue_b2b_price_job(doc.name)
+
+
+def enqueue_b2b_price_job(item_price_name):
+    """
+    Enqueue one background job for one Standard Buying Item Price.
+    """
+
+    if not item_price_name:
+        return
+
     frappe.enqueue(
         method=(
             "my_custom_app.update_Pricelist.dispatcher."
@@ -71,29 +108,112 @@ def on_item_price_change(doc, method=None):
         ),
         queue="long",
         enqueue_after_commit=True,
-        job_name=f"b2b_price_{doc.name}",
-        item_price_name=doc.name,
+        job_name=f"b2b_price_{item_price_name}",
+        item_price_name=item_price_name,
     )
 
+
+# ============================================================
+# PURCHASE INVOICE EVENT
+# ============================================================
+
+def on_purchase_invoice_submit(doc, method=None):
+    """
+    Handles Purchase Invoice submission/update-after-submit.
+
+    ERPNext may create or update Standard Buying Item Price
+    as part of Purchase Invoice processing.
+
+    After the transaction commits, find the affected Standard
+    Buying Item Prices and send them to the same pricing worker.
+
+    Batch number and UOM are matched separately.
+    """
+
+    if not doc:
+        return
+
+    if not doc.items:
+        return
+
+    item_price_names = set()
+
+    for invoice_item in doc.items:
+
+        if not invoice_item.item_code:
+            continue
+
+        invoice_uom = (
+            getattr(invoice_item, "uom", None)
+            or ""
+        )
+
+        invoice_batch_no = (
+            getattr(invoice_item, "batch_no", None)
+            or ""
+        )
+
+        source_prices = frappe.get_all(
+            "Item Price",
+            filters={
+                "item_code": invoice_item.item_code,
+                "price_list": SOURCE_PRICE_LIST,
+            },
+            fields=[
+                "name",
+                "uom",
+                "batch_no",
+            ],
+        )
+
+        for source_price in source_prices:
+
+            source_uom = (
+                source_price.uom
+                or ""
+            )
+
+            source_batch_no = (
+                source_price.batch_no
+                or ""
+            )
+
+            # Match UOM exactly.
+            if source_uom != invoice_uom:
+                continue
+
+            # Match batch exactly.
+            if source_batch_no != invoice_batch_no:
+                continue
+
+            item_price_names.add(
+                source_price.name
+            )
+
+    # Enqueue only once per Item Price.
+    for item_price_name in item_price_names:
+        enqueue_b2b_price_job(item_price_name)
+
+
+# ============================================================
+# BACKGROUND WORKER
+# ============================================================
 
 def process_b2b_price_background(item_price_name):
     """
     Background worker.
 
     Reloads the latest committed Standard Buying Item Price,
-    loads active B2B Pricing Rules,
-    finds the winning rule,
-    calculates the B2B price,
-    and updates the B2B Item Price.
+    calculates prices for all configured customer groups,
+    and updates/creates the corresponding selling Item Prices.
 
-    If the source Item Price was deleted, nothing is changed.
-    Therefore the existing B2B price remains unchanged.
+    If the source Item Price was deleted before this worker runs,
+    nothing is changed.
     """
 
     if not item_price_name:
         return
 
-    # Reload latest committed source Item Price.
     source_price = frappe.db.get_value(
         "Item Price",
         item_price_name,
@@ -110,27 +230,26 @@ def process_b2b_price_background(item_price_name):
     )
 
     # Source Item Price may have been deleted.
-    # Keep the existing B2B price unchanged.
+    # Do not delete/change existing target prices.
     if not source_price:
         return
 
-    # Make sure this is still the source price list.
     if source_price.price_list != SOURCE_PRICE_LIST:
         return
 
     if not source_price.item_code:
         return
 
-    # Validate buying rate.
     try:
-        buying_rate = float(source_price.price_list_rate or 0)
+        buying_rate = float(
+            source_price.price_list_rate or 0
+        )
     except (TypeError, ValueError):
         return
 
     if buying_rate <= 0:
         return
 
-    # Load Item information.
     item_data = frappe.db.get_value(
         "Item",
         source_price.item_code,
@@ -145,59 +264,78 @@ def process_b2b_price_background(item_price_name):
     if not item_data:
         return
 
-    # Do not process disabled Items.
     if item_data.disabled:
         return
 
-    # Load active Pricing Rules.
     rules = load_active_rules()
 
     if not rules:
         return
 
-    # Find the applicable/winning rule.
-    winning_rule = find_winning_rule(
-        rules=rules,
-        item_code=source_price.item_code,
-        item_group=item_data.item_group or "",
-        brand=item_data.brand or "",
-    )
+    # Process every configured customer group separately.
+    for target in PRICE_TARGETS:
 
-    if not winning_rule:
-        return
+        target_price_list = target["price_list"]
+        customer_group = target["customer_group"]
 
-    # Only percentage margins are supported.
-    if winning_rule.margin_type != "Percentage":
-        return
-
-    try:
-        margin = float(
-            winning_rule.margin_rate_or_amount or 0
+        winning_rule = find_winning_rule(
+            rules=rules,
+            price_list=target_price_list,
+            customer_group=customer_group,
+            item_code=source_price.item_code,
+            item_group=item_data.item_group or "",
+            brand=item_data.brand or "",
         )
-    except (TypeError, ValueError):
-        return
 
-    # Calculate B2B selling price.
-    b2b_rate = round(
-        buying_rate * (1 + margin / 100.0),
-        6,
-    )
+        if not winning_rule:
+            continue
 
-    # Update/create B2B Item Price.
-    update_b2b_item_price(
-        item_code=source_price.item_code,
-        b2b_rate=b2b_rate,
-        uom=source_price.uom or "",
-        batch_no=source_price.batch_no or "",
-        currency=source_price.currency,
-    )
+        if winning_rule.margin_type != "Percentage":
+            continue
 
+        try:
+            margin = float(
+                winning_rule.margin_rate_or_amount or 0
+            )
+        except (TypeError, ValueError):
+            continue
+
+        target_rate = round(
+            buying_rate * (1 + margin / 100.0),
+            6,
+        )
+
+        update_target_item_price(
+            item_code=source_price.item_code,
+            target_price_list=target_price_list,
+            target_rate=target_rate,
+            uom=source_price.uom or "",
+            batch_no=source_price.batch_no or "",
+            currency=source_price.currency,
+        )
+
+
+# ============================================================
+# PRICING RULE LOADING
+# ============================================================
 
 def load_active_rules():
     """
-    Loads all active B2B Pricing Rules and their child
-    conditions in bulk.
+    Load all active Pricing Rules used by the three
+    custom customer groups.
+
+    Child table conditions are loaded in bulk.
     """
+
+    target_price_lists = [
+        target["price_list"]
+        for target in PRICE_TARGETS
+    ]
+
+    customer_groups = [
+        target["customer_group"]
+        for target in PRICE_TARGETS
+    ]
 
     rules = frappe.db.sql(
         """
@@ -207,30 +345,35 @@ def load_active_rules():
             creation,
             apply_on,
             margin_type,
-            margin_rate_or_amount
+            margin_rate_or_amount,
+            for_price_list,
+            customer_group
         FROM `tabPricing Rule`
         WHERE selling = 1
           AND disable = 0
           AND docstatus < 2
-          AND for_price_list = %s
-          AND customer_group = %s
+          AND for_price_list IN %(price_lists)s
+          AND customer_group IN %(customer_groups)s
         ORDER BY priority DESC, creation ASC
         """,
-        (
-            B2B_PRICE_LIST,
-            B2B_CUSTOMER_GROUP,
-        ),
+        {
+            "price_lists": tuple(target_price_lists),
+            "customer_groups": tuple(customer_groups),
+        },
         as_dict=True,
     )
 
     if not rules:
         return []
 
-    rule_names = [rule.name for rule in rules]
+    rule_names = [
+        rule.name
+        for rule in rules
+    ]
 
-    # --------------------------------------------------
-    # Item Code conditions
-    # --------------------------------------------------
+    # --------------------------------------------------------
+    # Item Code
+    # --------------------------------------------------------
 
     item_code_map = {}
 
@@ -251,9 +394,9 @@ def load_active_rules():
             set(),
         ).add(row.item_code)
 
-    # --------------------------------------------------
-    # Item Group conditions
-    # --------------------------------------------------
+    # --------------------------------------------------------
+    # Item Group
+    # --------------------------------------------------------
 
     item_group_map = {}
 
@@ -274,9 +417,9 @@ def load_active_rules():
             set(),
         ).add(row.item_group)
 
-    # --------------------------------------------------
-    # Brand conditions
-    # --------------------------------------------------
+    # --------------------------------------------------------
+    # Brand
+    # --------------------------------------------------------
 
     brand_map = {}
 
@@ -297,8 +440,9 @@ def load_active_rules():
             set(),
         ).add(row.brand)
 
-    # Attach condition maps to each rule.
+    # Attach child conditions to each rule.
     for rule in rules:
+
         rule["_item_codes"] = item_code_map.get(
             rule.name,
             set(),
@@ -317,14 +461,21 @@ def load_active_rules():
     return rules
 
 
+# ============================================================
+# PRICING RULE MATCHING
+# ============================================================
+
 def find_winning_rule(
     rules,
+    price_list,
+    customer_group,
     item_code,
     item_group,
     brand,
 ):
     """
-    Determines the winning Pricing Rule.
+    Find the winning Pricing Rule for one target price list
+    and customer group.
 
     Selection order:
 
@@ -339,20 +490,39 @@ def find_winning_rule(
     matched_rules = []
 
     for rule in rules:
+
+        if rule.for_price_list != price_list:
+            continue
+
+        if rule.customer_group != customer_group:
+            continue
+
         apply_on = rule.apply_on
 
-        # Item Code rule
+        # ----------------------------------------------------
+        # Item Code
+        # ----------------------------------------------------
+
         if apply_on == "Item Code":
+
             if item_code in rule["_item_codes"]:
                 matched_rules.append(rule)
 
-        # Brand rule
+        # ----------------------------------------------------
+        # Brand
+        # ----------------------------------------------------
+
         elif apply_on == "Brand":
+
             if brand and brand in rule["_brands"]:
                 matched_rules.append(rule)
 
-        # Item Group rule
+        # ----------------------------------------------------
+        # Item Group
+        # ----------------------------------------------------
+
         elif apply_on == "Item Group":
+
             groups = rule["_item_groups"]
 
             if (
@@ -361,7 +531,10 @@ def find_winning_rule(
             ):
                 matched_rules.append(rule)
 
-        # Transaction / global rule
+        # ----------------------------------------------------
+        # Transaction
+        # ----------------------------------------------------
+
         elif apply_on in (
             "Transaction",
             None,
@@ -373,8 +546,11 @@ def find_winning_rule(
         return None
 
     def sort_key(rule):
+
         try:
-            priority = int(rule.priority or 0)
+            priority = int(
+                rule.priority or 0
+            )
         except (TypeError, ValueError):
             priority = 0
 
@@ -395,24 +571,37 @@ def find_winning_rule(
     )
 
 
-def update_b2b_item_price(
+# ============================================================
+# TARGET ITEM PRICE UPDATE
+# ============================================================
+
+def update_target_item_price(
     item_code,
-    b2b_rate,
+    target_price_list,
+    target_rate,
     uom,
     batch_no,
     currency,
 ):
     """
-    Updates an existing B2B Item Price or creates one.
+    Update an existing target Item Price or create one.
 
-    Existing B2B prices are never deleted by this process.
+    Matching is:
+
+        Item
+        + Price List
+        + UOM
+        + Batch
+        + Selling
+
+    Existing target Item Prices are never deleted.
     """
 
     existing = frappe.db.get_value(
         "Item Price",
         {
             "item_code": item_code,
-            "price_list": B2B_PRICE_LIST,
+            "price_list": target_price_list,
             "uom": uom or "",
             "batch_no": batch_no or "",
             "selling": 1,
@@ -426,8 +615,12 @@ def update_b2b_item_price(
         as_dict=True,
     )
 
-    # Existing B2B Item Price
+    # --------------------------------------------------------
+    # Existing target price
+    # --------------------------------------------------------
+
     if existing:
+
         try:
             old_rate = float(
                 existing.price_list_rate or 0
@@ -435,20 +628,18 @@ def update_b2b_item_price(
         except (TypeError, ValueError):
             old_rate = 0
 
-        # Do not write if nothing changed.
         if (
-            round(old_rate, 6) == round(b2b_rate, 6)
+            round(old_rate, 6)
+            == round(target_rate, 6)
             and existing.currency == currency
         ):
             return
 
-        # Direct DB update avoids triggering normal
-        # Item Price hooks again.
         frappe.db.set_value(
             "Item Price",
             existing.name,
             {
-                "price_list_rate": b2b_rate,
+                "price_list_rate": target_rate,
                 "currency": currency,
             },
             update_modified=False,
@@ -456,12 +647,17 @@ def update_b2b_item_price(
 
         return
 
-    # Create new B2B Item Price
-    new_price = frappe.new_doc("Item Price")
+    # --------------------------------------------------------
+    # Create target price
+    # --------------------------------------------------------
+
+    new_price = frappe.new_doc(
+        "Item Price"
+    )
 
     new_price.item_code = item_code
-    new_price.price_list = B2B_PRICE_LIST
-    new_price.price_list_rate = b2b_rate
+    new_price.price_list = target_price_list
+    new_price.price_list_rate = target_rate
     new_price.currency = currency
     new_price.uom = uom or ""
     new_price.batch_no = batch_no or ""
