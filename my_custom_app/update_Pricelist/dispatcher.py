@@ -1,25 +1,29 @@
 import frappe
+from frappe.utils import today
 
 
 SOURCE_PRICE_LIST = "Standard Buying"
 
 
+# These are the ONLY custom target price lists.
+# Retail is intentionally not included because ERPNext handles Retail.
 PRICE_TARGETS = [
     {
-        "customer_group": "Wholesale Store Clients",
         "price_list": "B2B WHOLESALE",
     },
     {
-        "customer_group": "Saloon",
         "price_list": "SALOON",
     },
     {
-        "customer_group": "Beauty Parlour",
         "price_list": "BEAUTY PARLOUR",
     },
 ]
 
 
+# Lower number = more specific.
+#
+# Existing matching logic is preserved:
+# Item Code > Brand > Item Group > Transaction
 RULE_SPECIFICITY = {
     "Item Code": 1,
     "Brand": 2,
@@ -30,22 +34,17 @@ RULE_SPECIFICITY = {
 }
 
 
-# ============================================================
+# ----------------------------------------------------------------------
 # ITEM PRICE EVENT
-# ============================================================
+# ----------------------------------------------------------------------
 
 def on_item_price_change(doc, method=None):
     """
-    Handles Standard Buying Item Price creation/update.
+    Triggered when an Item Price is inserted or updated.
 
-    Only Standard Buying is used as the source.
+    Only Standard Buying is treated as a source.
 
-    Target price lists:
-        - B2B WHOLESALE
-        - SALOON
-        - BEAUTY PARLOUR
-
-    Retail is intentionally not handled here.
+    Target price lists are ignored as sources to prevent loops.
     """
 
     if not doc:
@@ -54,20 +53,22 @@ def on_item_price_change(doc, method=None):
     if not doc.item_code:
         return
 
-    # Never process any custom target price list as a source.
+    price_list = doc.price_list
+
+    # Never process our generated target prices as source prices.
     target_price_lists = {
         target["price_list"]
         for target in PRICE_TARGETS
     }
 
-    if doc.price_list in target_price_lists:
+    if price_list in target_price_lists:
         return
 
-    # Only Standard Buying is our source.
-    if doc.price_list != SOURCE_PRICE_LIST:
+    # Only Standard Buying is a source.
+    if price_list != SOURCE_PRICE_LIST:
         return
 
-    # On update, process only pricing-relevant changes.
+    # On update, only enqueue when a pricing-relevant field changed.
     if method == "on_update":
         relevant_fields = (
             "price_list_rate",
@@ -82,12 +83,8 @@ def on_item_price_change(doc, method=None):
         ):
             return
 
-    try:
-        buying_rate = float(doc.price_list_rate or 0)
-    except (TypeError, ValueError):
-        return
-
-    if buying_rate <= 0:
+    # Do not generate prices from invalid source rates.
+    if not doc.price_list_rate or doc.price_list_rate <= 0:
         return
 
     enqueue_b2b_price_job(doc.name)
@@ -95,17 +92,12 @@ def on_item_price_change(doc, method=None):
 
 def enqueue_b2b_price_job(item_price_name):
     """
-    Enqueue one background job for one Standard Buying Item Price.
+    Enqueue the source Item Price for background processing.
     """
 
-    if not item_price_name:
-        return
-
     frappe.enqueue(
-        method=(
-            "my_custom_app.update_Pricelist.dispatcher."
-            "process_b2b_price_background"
-        ),
+        "my_custom_app.update_Pricelist.dispatcher."
+        "process_b2b_price_background",
         queue="long",
         enqueue_after_commit=True,
         job_name=f"b2b_price_{item_price_name}",
@@ -113,112 +105,133 @@ def enqueue_b2b_price_job(item_price_name):
     )
 
 
-# ============================================================
+# ----------------------------------------------------------------------
 # PURCHASE INVOICE EVENT
-# ============================================================
+# ----------------------------------------------------------------------
 
 def on_purchase_invoice_submit(doc, method=None):
     """
-    Handles Purchase Invoice submission/update-after-submit.
+    Purchase Invoice safety trigger.
 
-    ERPNext may create or update Standard Buying Item Price
-    as part of Purchase Invoice processing.
-
-    After the transaction commits, find the affected Standard
-    Buying Item Prices and send them to the same pricing worker.
-
-    Batch number and UOM are matched separately.
+    The actual Item Price lookup is intentionally performed AFTER COMMIT.
+    This ensures any Standard Buying Item Price created/updated during
+    Purchase Invoice processing is already committed and visible.
     """
 
     if not doc:
         return
 
-    if not doc.items:
+    frappe.enqueue(
+        "my_custom_app.update_Pricelist.dispatcher."
+        "process_purchase_invoice_background",
+        queue="long",
+        enqueue_after_commit=True,
+        job_name=f"purchase_invoice_b2b_{doc.name}",
+        purchase_invoice_name=doc.name,
+    )
+
+
+def process_purchase_invoice_background(purchase_invoice_name):
+    """
+    Reload the committed Purchase Invoice and find the corresponding
+    Standard Buying Item Prices.
+
+    Matching is done by:
+    - Item Code
+    - UOM
+    - Batch No
+
+    Each matching Standard Buying Item Price is then processed.
+    """
+
+    if not frappe.db.exists(
+        "Purchase Invoice",
+        purchase_invoice_name
+    ):
         return
 
-    item_price_names = set()
+    invoice = frappe.get_doc(
+        "Purchase Invoice",
+        purchase_invoice_name
+    )
 
-    for invoice_item in doc.items:
+    source_price_names = set()
 
-        if not invoice_item.item_code:
+    for row in invoice.items:
+
+        if not row.item_code:
             continue
 
-        invoice_uom = (
-            getattr(invoice_item, "uom", None)
-            or ""
-        )
+        filters = {
+            "item_code": row.item_code,
+            "price_list": SOURCE_PRICE_LIST,
+        }
 
-        invoice_batch_no = (
-            getattr(invoice_item, "batch_no", None)
-            or ""
-        )
+        source_uom = row.uom or ""
+        source_batch = row.batch_no or ""
 
         source_prices = frappe.get_all(
             "Item Price",
-            filters={
-                "item_code": invoice_item.item_code,
-                "price_list": SOURCE_PRICE_LIST,
-            },
+            filters=filters,
             fields=[
                 "name",
                 "uom",
                 "batch_no",
+                "price_list_rate",
             ],
         )
 
         for source_price in source_prices:
 
-            source_uom = (
-                source_price.uom
-                or ""
-            )
+            price_uom = source_price.uom or ""
+            price_batch = source_price.batch_no or ""
 
-            source_batch_no = (
-                source_price.batch_no
-                or ""
-            )
-
-            # Match UOM exactly.
-            if source_uom != invoice_uom:
+            if price_uom != source_uom:
                 continue
 
-            # Match batch exactly.
-            if source_batch_no != invoice_batch_no:
+            if price_batch != source_batch:
                 continue
 
-            item_price_names.add(
-                source_price.name
-            )
+            if not source_price.price_list_rate:
+                continue
 
-    # Enqueue only once per Item Price.
-    for item_price_name in item_price_names:
+            if source_price.price_list_rate <= 0:
+                continue
+
+            source_price_names.add(source_price.name)
+
+    for item_price_name in source_price_names:
         enqueue_b2b_price_job(item_price_name)
 
 
-# ============================================================
-# BACKGROUND WORKER
-# ============================================================
+# ----------------------------------------------------------------------
+# MAIN BACKGROUND PRICE PROCESSOR
+# ----------------------------------------------------------------------
 
 def process_b2b_price_background(item_price_name):
     """
-    Background worker.
+    Recalculate all custom target price lists from one Standard Buying
+    Item Price.
 
-    Reloads the latest committed Standard Buying Item Price,
-    calculates prices for all configured customer groups,
-    and updates/creates the corresponding selling Item Prices.
+    One source Item Price can therefore update:
 
-    If the source Item Price was deleted before this worker runs,
-    nothing is changed.
+        B2B WHOLESALE
+        SALOON
+        BEAUTY PARLOUR
+
+    independently.
     """
 
-    if not item_price_name:
+    if not frappe.db.exists(
+        "Item Price",
+        item_price_name
+    ):
         return
 
-    source_price = frappe.db.get_value(
+    source = frappe.db.get_value(
         "Item Price",
         item_price_name,
         [
-            "name",
             "item_code",
             "price_list",
             "price_list_rate",
@@ -229,30 +242,29 @@ def process_b2b_price_background(item_price_name):
         as_dict=True,
     )
 
-    # Source Item Price may have been deleted.
-    # Do not delete/change existing target prices.
-    if not source_price:
+    if not source:
         return
 
-    if source_price.price_list != SOURCE_PRICE_LIST:
+    # Safety: only Standard Buying can enter this processor.
+    if source.price_list != SOURCE_PRICE_LIST:
         return
 
-    if not source_price.item_code:
+    if not source.item_code:
         return
 
-    try:
-        buying_rate = float(
-            source_price.price_list_rate or 0
-        )
-    except (TypeError, ValueError):
+    if not source.price_list_rate:
         return
 
-    if buying_rate <= 0:
+    if source.price_list_rate <= 0:
         return
 
-    item_data = frappe.db.get_value(
+    # ------------------------------------------------------------------
+    # ITEM DATA
+    # ------------------------------------------------------------------
+
+    item = frappe.db.get_value(
         "Item",
-        source_price.item_code,
+        source.item_code,
         [
             "item_group",
             "brand",
@@ -261,70 +273,86 @@ def process_b2b_price_background(item_price_name):
         as_dict=True,
     )
 
-    if not item_data:
+    if not item:
         return
 
-    if item_data.disabled:
+    if item.disabled:
         return
+
+    item_group = item.item_group
+    brand = item.brand
+
+    # ------------------------------------------------------------------
+    # LOAD ALL ACTIVE PRICING RULES
+    # ------------------------------------------------------------------
 
     rules = load_active_rules()
 
-    if not rules:
-        return
+    # ------------------------------------------------------------------
+    # PROCESS EACH TARGET PRICE LIST
+    # ------------------------------------------------------------------
 
-    # Process every configured customer group separately.
     for target in PRICE_TARGETS:
 
         target_price_list = target["price_list"]
-        customer_group = target["customer_group"]
 
         winning_rule = find_winning_rule(
             rules=rules,
             price_list=target_price_list,
-            customer_group=customer_group,
-            item_code=source_price.item_code,
-            item_group=item_data.item_group or "",
-            brand=item_data.brand or "",
+            item_code=source.item_code,
+            item_group=item_group,
+            brand=brand,
         )
 
         if not winning_rule:
             continue
 
-        if winning_rule.margin_type != "Percentage":
+        margin_type = winning_rule.get("margin_type")
+        margin_value = winning_rule.get(
+            "margin_rate_or_amount"
+        )
+
+        if margin_type != "Percentage":
+            # Current custom logic supports Percentage rules.
             continue
 
         try:
-            margin = float(
-                winning_rule.margin_rate_or_amount or 0
-            )
+            margin_value = float(margin_value or 0)
         except (TypeError, ValueError):
             continue
 
-        target_rate = round(
-            buying_rate * (1 + margin / 100.0),
-            6,
+        buying_rate = float(source.price_list_rate)
+
+        target_rate = buying_rate * (
+            1 + (margin_value / 100)
         )
+
+        if target_rate <= 0:
+            continue
 
         update_target_item_price(
-            item_code=source_price.item_code,
-            target_price_list=target_price_list,
-            target_rate=target_rate,
-            uom=source_price.uom or "",
-            batch_no=source_price.batch_no or "",
-            currency=source_price.currency,
+            item_code=source.item_code,
+            price_list=target_price_list,
+            price_list_rate=target_rate,
+            uom=source.uom,
+            batch_no=source.batch_no,
+            currency=source.currency,
         )
 
 
-# ============================================================
-# PRICING RULE LOADING
-# ============================================================
+# ----------------------------------------------------------------------
+# LOAD PRICING RULES
+# ----------------------------------------------------------------------
 
 def load_active_rules():
     """
-    Load all active Pricing Rules used by the three
-    custom customer groups.
+    Load active Pricing Rules for our three target Price Lists.
 
-    Child table conditions are loaded in bulk.
+    IMPORTANT:
+    Customer Group is intentionally NOT used.
+
+    Price List determines which Pricing Rule belongs to which
+    target calculation.
     """
 
     target_price_lists = [
@@ -332,52 +360,34 @@ def load_active_rules():
         for target in PRICE_TARGETS
     ]
 
-    customer_groups = [
-        target["customer_group"]
-        for target in PRICE_TARGETS
-    ]
-
-    rules = frappe.db.sql(
-        """
-        SELECT
-            name,
-            priority,
-            creation,
-            apply_on,
-            margin_type,
-            margin_rate_or_amount,
-            for_price_list,
-            customer_group
-        FROM `tabPricing Rule`
-        WHERE selling = 1
-          AND disable = 0
-          AND docstatus < 2
-          AND for_price_list IN %(price_lists)s
-          AND customer_group IN %(customer_groups)s
-        ORDER BY priority DESC, creation ASC
-        """,
-        {
-            "price_lists": tuple(target_price_lists),
-            "customer_groups": tuple(customer_groups),
+    rules = frappe.get_all(
+        "Pricing Rule",
+        filters={
+            "disabled": 0,
+            "selling": 1,
+            "for_price_list": ["in", target_price_lists],
         },
-        as_dict=True,
+        fields=[
+            "name",
+            "priority",
+            "creation",
+            "apply_on",
+            "margin_type",
+            "margin_rate_or_amount",
+            "for_price_list",
+        ],
     )
 
     if not rules:
         return []
 
-    rule_names = [
-        rule.name
-        for rule in rules
-    ]
+    rule_names = [rule.name for rule in rules]
 
-    # --------------------------------------------------------
-    # Item Code
-    # --------------------------------------------------------
+    # --------------------------------------------------------------
+    # ITEM CODE CONDITIONS
+    # --------------------------------------------------------------
 
-    item_code_map = {}
-
-    rows = frappe.get_all(
+    item_code_rows = frappe.get_all(
         "Pricing Rule Item Code",
         filters={
             "parent": ["in", rule_names],
@@ -388,19 +398,19 @@ def load_active_rules():
         ],
     )
 
-    for row in rows:
-        item_code_map.setdefault(
+    item_codes = {}
+
+    for row in item_code_rows:
+        item_codes.setdefault(
             row.parent,
-            set(),
+            set()
         ).add(row.item_code)
 
-    # --------------------------------------------------------
-    # Item Group
-    # --------------------------------------------------------
+    # --------------------------------------------------------------
+    # ITEM GROUP CONDITIONS
+    # --------------------------------------------------------------
 
-    item_group_map = {}
-
-    rows = frappe.get_all(
+    item_group_rows = frappe.get_all(
         "Pricing Rule Item Group",
         filters={
             "parent": ["in", rule_names],
@@ -411,19 +421,19 @@ def load_active_rules():
         ],
     )
 
-    for row in rows:
-        item_group_map.setdefault(
+    item_groups = {}
+
+    for row in item_group_rows:
+        item_groups.setdefault(
             row.parent,
-            set(),
+            set()
         ).add(row.item_group)
 
-    # --------------------------------------------------------
-    # Brand
-    # --------------------------------------------------------
+    # --------------------------------------------------------------
+    # BRAND CONDITIONS
+    # --------------------------------------------------------------
 
-    brand_map = {}
-
-    rows = frappe.get_all(
+    brand_rows = frappe.get_all(
         "Pricing Rule Brand",
         filters={
             "parent": ["in", rule_names],
@@ -434,129 +444,145 @@ def load_active_rules():
         ],
     )
 
-    for row in rows:
-        brand_map.setdefault(
+    brands = {}
+
+    for row in brand_rows:
+        brands.setdefault(
             row.parent,
-            set(),
+            set()
         ).add(row.brand)
 
-    # Attach child conditions to each rule.
+    # --------------------------------------------------------------
+    # ATTACH CONDITIONS TO RULES
+    # --------------------------------------------------------------
+
     for rule in rules:
 
-        rule["_item_codes"] = item_code_map.get(
+        rule.item_codes = item_codes.get(
             rule.name,
-            set(),
+            set()
         )
 
-        rule["_item_groups"] = item_group_map.get(
+        rule.item_groups = item_groups.get(
             rule.name,
-            set(),
+            set()
         )
 
-        rule["_brands"] = brand_map.get(
+        rule.brands = brands.get(
             rule.name,
-            set(),
+            set()
         )
 
     return rules
 
 
-# ============================================================
-# PRICING RULE MATCHING
-# ============================================================
+# ----------------------------------------------------------------------
+# FIND WINNING RULE
+# ----------------------------------------------------------------------
 
 def find_winning_rule(
     rules,
     price_list,
-    customer_group,
     item_code,
     item_group,
     brand,
 ):
     """
-    Find the winning Pricing Rule for one target price list
-    and customer group.
+    Find the winning Pricing Rule.
 
-    Selection order:
+    Matching order remains:
 
-    1. Higher priority number
-    2. Item Code specificity
-    3. Brand specificity
-    4. Item Group specificity
-    5. Transaction specificity
-    6. Older creation time
+        Item Code
+        Brand
+        Item Group
+        Transaction
+
+    Priority is preserved.
+
+    Customer Group is NOT checked.
+
+    All Item Groups acts as the default Item Group condition.
     """
 
     matched_rules = []
 
     for rule in rules:
 
+        # ----------------------------------------------------------
+        # PRICE LIST MUST MATCH
+        # ----------------------------------------------------------
+
         if rule.for_price_list != price_list:
             continue
 
-        if rule.customer_group != customer_group:
-            continue
+        apply_on = rule.apply_on or ""
 
-        apply_on = rule.apply_on
-
-        # ----------------------------------------------------
-        # Item Code
-        # ----------------------------------------------------
+        # ----------------------------------------------------------
+        # ITEM CODE
+        # ----------------------------------------------------------
 
         if apply_on == "Item Code":
 
-            if item_code in rule["_item_codes"]:
-                matched_rules.append(rule)
+            if item_code not in rule.item_codes:
+                continue
 
-        # ----------------------------------------------------
-        # Brand
-        # ----------------------------------------------------
+        # ----------------------------------------------------------
+        # BRAND
+        # ----------------------------------------------------------
 
         elif apply_on == "Brand":
 
-            if brand and brand in rule["_brands"]:
-                matched_rules.append(rule)
+            if brand not in rule.brands:
+                continue
 
-        # ----------------------------------------------------
-        # Item Group
-        # ----------------------------------------------------
+        # ----------------------------------------------------------
+        # ITEM GROUP
+        # ----------------------------------------------------------
 
         elif apply_on == "Item Group":
 
-            groups = rule["_item_groups"]
+            groups = rule.item_groups
 
+            # All Item Groups = DEFAULT
             if (
-                item_group in groups
-                or "All Item Groups" in groups
+                "All Item Groups" not in groups
+                and item_group not in groups
             ):
-                matched_rules.append(rule)
+                continue
 
-        # ----------------------------------------------------
-        # Transaction
-        # ----------------------------------------------------
+        # ----------------------------------------------------------
+        # TRANSACTION / GENERIC RULE
+        # ----------------------------------------------------------
 
         elif apply_on in (
             "Transaction",
-            None,
             "",
+            None,
         ):
-            matched_rules.append(rule)
+            pass
+
+        else:
+            continue
+
+        matched_rules.append(rule)
 
     if not matched_rules:
         return None
 
+    # --------------------------------------------------------------
+    # EXISTING PRIORITY + SPECIFICITY + CREATION LOGIC
+    # --------------------------------------------------------------
+
     def sort_key(rule):
 
         try:
-            priority = int(
-                rule.priority or 0
-            )
+            priority = int(rule.priority or 0)
         except (TypeError, ValueError):
             priority = 0
 
         specificity = RULE_SPECIFICITY.get(
             rule.apply_on,
-            99,
+            4,
         )
 
         return (
@@ -571,99 +597,105 @@ def find_winning_rule(
     )
 
 
-# ============================================================
-# TARGET ITEM PRICE UPDATE
-# ============================================================
+# ----------------------------------------------------------------------
+# UPDATE / CREATE TARGET ITEM PRICE
+# ----------------------------------------------------------------------
 
 def update_target_item_price(
     item_code,
-    target_price_list,
-    target_rate,
-    uom,
-    batch_no,
-    currency,
+    price_list,
+    price_list_rate,
+    uom=None,
+    batch_no=None,
+    currency=None,
 ):
     """
     Update an existing target Item Price or create one.
 
-    Matching is:
+    Target identity:
 
-        Item
-        + Price List
-        + UOM
-        + Batch
-        + Selling
-
-    Existing target Item Prices are never deleted.
+        Item Code
+        Price List
+        UOM
+        Batch No
+        Selling = 1
     """
 
-    existing = frappe.db.get_value(
+    uom = uom or ""
+    batch_no = batch_no or ""
+
+    existing_prices = frappe.get_all(
         "Item Price",
-        {
+        filters={
             "item_code": item_code,
-            "price_list": target_price_list,
-            "uom": uom or "",
-            "batch_no": batch_no or "",
+            "price_list": price_list,
             "selling": 1,
         },
-        [
+        fields=[
             "name",
-            "price_list_rate",
-            "currency",
+            "creation",
+            "uom",
+            "batch_no",
         ],
         order_by="creation asc",
-        as_dict=True,
     )
 
-    # --------------------------------------------------------
-    # Existing target price
-    # --------------------------------------------------------
+    target_name = None
 
-    if existing:
+    for price in existing_prices:
 
-        try:
-            old_rate = float(
-                existing.price_list_rate or 0
-            )
-        except (TypeError, ValueError):
-            old_rate = 0
+        existing_uom = price.uom or ""
+        existing_batch = price.batch_no or ""
 
-        if (
-            round(old_rate, 6)
-            == round(target_rate, 6)
-            and existing.currency == currency
-        ):
-            return
+        if existing_uom != uom:
+            continue
+
+        if existing_batch != batch_no:
+            continue
+
+        target_name = price.name
+        break
+
+    # --------------------------------------------------------------
+    # UPDATE EXISTING
+    # --------------------------------------------------------------
+
+    if target_name:
+
+        values = {
+            "price_list_rate": price_list_rate,
+        }
+
+        if currency:
+            values["currency"] = currency
 
         frappe.db.set_value(
             "Item Price",
-            existing.name,
-            {
-                "price_list_rate": target_rate,
-                "currency": currency,
-            },
-            update_modified=False,
+            target_name,
+            values,
+            update_modified=True,
         )
 
         return
 
-    # --------------------------------------------------------
-    # Create target price
-    # --------------------------------------------------------
+    # --------------------------------------------------------------
+    # CREATE NEW
+    # --------------------------------------------------------------
 
-    new_price = frappe.new_doc(
-        "Item Price"
+    item_price = frappe.get_doc(
+        {
+            "doctype": "Item Price",
+            "item_code": item_code,
+            "price_list": price_list,
+            "price_list_rate": price_list_rate,
+            "selling": 1,
+            "uom": uom or None,
+            "batch_no": batch_no or None,
+            "currency": currency,
+            "valid_from": today(),
+        }
     )
 
-    new_price.item_code = item_code
-    new_price.price_list = target_price_list
-    new_price.price_list_rate = target_rate
-    new_price.currency = currency
-    new_price.uom = uom or ""
-    new_price.batch_no = batch_no or ""
-    new_price.selling = 1
-    new_price.valid_from = frappe.utils.today()
-
-    new_price.insert(
-        ignore_permissions=True,
+    item_price.insert(
+        ignore_permissions=True
     )
