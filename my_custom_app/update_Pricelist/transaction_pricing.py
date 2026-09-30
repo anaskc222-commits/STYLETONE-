@@ -1,6 +1,3 @@
-import frappe
-
-
 TARGET_PRICE_LISTS = {
     "B2B WHOLESALE",
     "SALOON",
@@ -10,26 +7,21 @@ TARGET_PRICE_LISTS = {
 
 def set_ignore_pricing_rule(doc, method=None):
     """
-    Automatically set Ignore Pricing Rule for the custom selling
-    price lists.
+    For the custom selling Price Lists, prevent ERPNext from applying
+    the Pricing Rule a second time.
 
-    The generated Item Price remains the transaction's starting rate.
-    The user can still manually change the rate if ERPNext allows
-    Price List Rate editing.
+    The rate already stored in Item Price is used as the transaction rate.
+
+    This function intentionally performs no database queries and does not
+    enqueue any background jobs.
     """
 
     if not doc:
         return
 
-    price_list = getattr(doc, "selling_price_list", None)
+    selling_price_list = doc.get("selling_price_list")
 
-    if not price_list:
+    if selling_price_list not in TARGET_PRICE_LISTS:
         return
 
-    if price_list not in TARGET_PRICE_LISTS:
-        return
-
-    meta = frappe.get_meta(doc.doctype)
-
-    if meta.has_field("ignore_pricing_rule"):
-        doc.ignore_pricing_rule = 1
+    doc.ignore_pricing_rule = 1
