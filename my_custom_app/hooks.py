@@ -6,6 +6,13 @@ app_email = "your-email@example.com"
 app_license = "MIT"
 
 
+doctype_js = {
+    "Quotation": "public/js/transaction_pricing.js",
+    "Sales Order": "public/js/transaction_pricing.js",
+    "Sales Invoice": "public/js/transaction_pricing.js",
+}
+
+
 doc_events = {
     "Item Price": {
         "after_insert": (
@@ -41,23 +48,23 @@ doc_events = {
     },
 
     "Quotation": {
-        "before_validate": (
+        "validate": (
             "my_custom_app.update_Pricelist.transaction_pricing."
-            "set_ignore_pricing_rule"
+            "validate_discount_limit"
         ),
     },
 
     "Sales Order": {
-        "before_validate": (
+        "validate": (
             "my_custom_app.update_Pricelist.transaction_pricing."
-            "set_ignore_pricing_rule"
+            "validate_discount_limit"
         ),
     },
 
     "Sales Invoice": {
-        "before_validate": (
+        "validate": (
             "my_custom_app.update_Pricelist.transaction_pricing."
-            "set_ignore_pricing_rule"
+            "validate_discount_limit"
         ),
     },
 }
