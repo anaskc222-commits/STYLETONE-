@@ -39,4 +39,30 @@ doc_events = {
             "trigger_from_pricing_rule"
         ),
     },
+
+    # ---------------------------------------------------------------
+    # Prevent Pricing Rule from changing the already-calculated rate
+    # in Quotation, Sales Order and Sales Invoice
+    # ---------------------------------------------------------------
+
+    "Quotation": {
+        "before_validate": (
+            "my_custom_app.update_Pricelist.transaction_pricing."
+            "set_ignore_pricing_rule"
+        ),
+    },
+
+    "Sales Order": {
+        "before_validate": (
+            "my_custom_app.update_Pricelist.transaction_pricing."
+            "set_ignore_pricing_rule"
+        ),
+    },
+
+    "Sales Invoice": {
+        "before_validate": (
+            "my_custom_app.update_Pricelist.transaction_pricing."
+            "set_ignore_pricing_rule"
+        ),
+    },
 }
