@@ -13,21 +13,6 @@ doctype_js = {
 }
 
 
-# ----------------------------------------------------------------------
-# DOCTYPE CLASS EXTENSIONS
-# ----------------------------------------------------------------------
-
-extend_doctype_class = {
-    "Quotation": [
-        "my_custom_app.extensions.quotation.QuotationBatchPricingMixin"
-    ]
-}
-
-
-# ----------------------------------------------------------------------
-# DOCUMENT EVENTS
-# ----------------------------------------------------------------------
-
 doc_events = {
     "Item Price": {
         "after_insert": (
@@ -52,3 +37,34 @@ doc_events = {
     },
 
     "Pricing Rule": {
+        "after_insert": (
+            "my_custom_app.PRICELISTFOR_PRICING_RULE.dispatcher."
+            "trigger_from_pricing_rule"
+        ),
+        "on_update": (
+            "my_custom_app.PRICELISTFOR_PRICING_RULE.dispatcher."
+            "trigger_from_pricing_rule"
+        ),
+    },
+
+    "Quotation": {
+        "validate": (
+            "my_custom_app.update_Pricelist.transaction_pricing."
+            "validate_discount_limit"
+        ),
+    },
+
+    "Sales Order": {
+        "validate": (
+            "my_custom_app.update_Pricelist.transaction_pricing."
+            "validate_discount_limit"
+        ),
+    },
+
+    "Sales Invoice": {
+        "validate": (
+            "my_custom_app.update_Pricelist.transaction_pricing."
+            "validate_discount_limit"
+        ),
+    },
+}
