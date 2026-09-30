@@ -7,13 +7,19 @@ TARGET_PRICE_LISTS = {
 
 def set_ignore_pricing_rule(doc, method=None):
     """
-    For the custom selling Price Lists, prevent ERPNext from applying
-    the Pricing Rule a second time.
+    Only affect transactions using the three custom selling Price Lists.
 
-    The rate already stored in Item Price is used as the transaction rate.
+    Standard Selling:
+        Completely untouched.
 
-    This function intentionally performs no database queries and does not
-    enqueue any background jobs.
+    POS:
+        Completely untouched because POS uses Standard Selling in this setup.
+
+    All other Price Lists:
+        Completely untouched.
+
+    No database queries.
+    No background jobs.
     """
 
     if not doc:
