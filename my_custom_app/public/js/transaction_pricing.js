@@ -13,10 +13,7 @@ function update_ignore_pricing_rule(frm) {
     const value = should_ignore ? 1 : 0;
 
     if (frm.doc.ignore_pricing_rule !== value) {
-        frm.set_value(
-            "ignore_pricing_rule",
-            value
-        );
+        frm.set_value("ignore_pricing_rule", value);
     }
 }
 
