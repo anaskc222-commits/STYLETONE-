@@ -22,15 +22,29 @@ def validate_discount_limit(doc, method=None):
     SALOON         -> minimum 7% margin
     BEAUTY PARLOUR -> minimum 10% margin
 
-    Special code 999:
+    Special code:
+        custom_code = 999
+
         Sell exactly at Standard Buying price.
         The actual discount percentage is calculated automatically.
 
     Standard Selling and all other Price Lists are untouched.
+    POS invoices are completely ignored.
     """
 
     if not doc:
         return
+
+    # ----------------------------------------------------------
+    # Do not run custom logic for POS Next
+    # ----------------------------------------------------------
+
+    if doc.get("pos_profile") or doc.get("pos_opening_shift"):
+        return
+
+    # ----------------------------------------------------------
+    # Only process the three custom Selling Price Lists
+    # ----------------------------------------------------------
 
     price_list = doc.get("selling_price_list")
 
@@ -38,7 +52,8 @@ def validate_discount_limit(doc, method=None):
         return
 
     items = [
-        row for row in (doc.get("items") or [])
+        row
+        for row in (doc.get("items") or [])
         if row.item_code
     ]
 
@@ -46,18 +61,33 @@ def validate_discount_limit(doc, method=None):
         return
 
     # ----------------------------------------------------------
-    # Check whether a database lookup is actually needed.
+    # Check whether Standard Buying prices are required.
+    #
+    # Normal discount > 0 OR custom_code = 999
     # ----------------------------------------------------------
 
     needs_buying_prices = False
 
     for row in items:
-        discount = get_number(row.discount_percentage)
 
-        if discount is None:
-            continue
+        special_code = get_number(
+            row.get("custom_code")
+        )
 
-        if discount > 0:
+        if (
+            special_code is not None
+            and abs(
+                special_code - SPECIAL_ZERO_MARGIN_CODE
+            ) < 0.000001
+        ):
+            needs_buying_prices = True
+            break
+
+        discount = get_number(
+            row.get("discount_percentage")
+        )
+
+        if discount is not None and discount > 0:
             needs_buying_prices = True
             break
 
@@ -65,7 +95,7 @@ def validate_discount_limit(doc, method=None):
         return
 
     # ----------------------------------------------------------
-    # ONE Standard Buying query for the whole document.
+    # ONE Standard Buying query for the whole document
     # ----------------------------------------------------------
 
     buying_prices = get_buying_prices_for_document(items)
@@ -74,68 +104,73 @@ def validate_discount_limit(doc, method=None):
         MINIMUM_MARGIN_PERCENT[price_list]
     )
 
+    # ----------------------------------------------------------
+    # Validate each row
+    # ----------------------------------------------------------
+
     for row in items:
 
-        discount = get_number(row.discount_percentage)
+        special_code = get_number(
+            row.get("custom_code")
+        )
 
-        if discount is None:
-            continue
+        discount = get_number(
+            row.get("discount_percentage")
+        )
 
-        # ------------------------------------------------------
-        # Special 999 code
-        # ------------------------------------------------------
+        # ======================================================
+        # SPECIAL CODE 999
+        # ======================================================
 
-        if abs(discount - SPECIAL_ZERO_MARGIN_CODE) < 0.000001:
+        if (
+            special_code is not None
+            and abs(
+                special_code - SPECIAL_ZERO_MARGIN_CODE
+            ) < 0.000001
+        ):
+
             key = make_price_key(
                 row.item_code,
                 row.uom,
                 row.batch_no,
             )
 
-            buying_rate = buying_prices.get(key, 0.0)
+            buying_rate = buying_prices.get(
+                key,
+                0.0,
+            )
 
             if buying_rate <= 0:
                 frappe.throw(
-                    (
-                        "Special code <b>{code}</b> cannot be used "
-                        "for item <b>{item}</b> because a valid "
-                        "Standard Buying price was not found for "
-                        "the same UOM and Batch."
-                    ).format(
-                        code=int(SPECIAL_ZERO_MARGIN_CODE),
-                        item=row.item_code,
-                    )
+                    f"Special code <b>999</b> cannot be used "
+                    f"for item <b>{row.item_code}</b> because a valid "
+                    f"Standard Buying price was not found for "
+                    f"the same UOM and Batch."
                 )
 
             selling_rate = get_selling_rate(row)
 
             if selling_rate <= 0:
                 frappe.throw(
-                    (
-                        "Special code <b>{code}</b> cannot be used "
-                        "for item <b>{item}</b> because the "
-                        "selling Price List rate is not available."
-                    ).format(
-                        code=int(SPECIAL_ZERO_MARGIN_CODE),
-                        item=row.item_code,
-                    )
+                    f"Special code <b>999</b> cannot be used "
+                    f"for item <b>{row.item_code}</b> because the "
+                    f"selling Price List rate is not available."
                 )
 
             if selling_rate < buying_rate:
                 frappe.throw(
-                    (
-                        "Special code <b>{code}</b> cannot be used "
-                        "for item <b>{item}</b> because the "
-                        "{price_list} price ({selling:.2f}) is below "
-                        "Standard Buying ({buying:.2f})."
-                    ).format(
-                        code=int(SPECIAL_ZERO_MARGIN_CODE),
-                        item=row.item_code,
-                        price_list=price_list,
-                        selling=selling_rate,
-                        buying=buying_rate,
-                    )
+                    f"Special code <b>999</b> cannot be used "
+                    f"for item <b>{row.item_code}</b> because the "
+                    f"{price_list} price "
+                    f"({selling_rate:.2f}) is below "
+                    f"Standard Buying "
+                    f"({buying_rate:.2f})."
                 )
+
+            # --------------------------------------------------
+            # Calculate the real discount required to sell
+            # exactly at Standard Buying.
+            # --------------------------------------------------
 
             actual_discount = (
                 (selling_rate - buying_rate)
@@ -154,9 +189,12 @@ def validate_discount_limit(doc, method=None):
 
             continue
 
-        # ------------------------------------------------------
-        # Normal discount validation
-        # ------------------------------------------------------
+        # ======================================================
+        # NORMAL DISCOUNT VALIDATION
+        # ======================================================
+
+        if discount is None:
+            continue
 
         if discount <= 0:
             continue
@@ -172,7 +210,10 @@ def validate_discount_limit(doc, method=None):
             row.batch_no,
         )
 
-        buying_rate = buying_prices.get(key, 0.0)
+        buying_rate = buying_prices.get(
+            key,
+            0.0,
+        )
 
         # No matching Standard Buying price:
         # do not interfere with the transaction.
@@ -191,40 +232,34 @@ def validate_discount_limit(doc, method=None):
                 / selling_rate
             ) * 100
 
-        max_discount = round(max_discount, 6)
+        max_discount = round(
+            max_discount,
+            6,
+        )
 
         if discount > max_discount + 0.000001:
+
             frappe.throw(
-                (
-                    "<b>Discount exceeds the allowed limit</b>"
-                    "<br><br>"
-                    "Item: <b>{item}</b>"
-                    "<br>"
-                    "Price List: <b>{price_list}</b>"
-                    "<br>"
-                    "Standard Buying Rate: "
-                    "<b>{buying:.2f}</b>"
-                    "<br>"
-                    "Price List Rate: "
-                    "<b>{selling:.2f}</b>"
-                    "<br>"
-                    "Minimum Required Margin: "
-                    "<b>{margin:.2f}%</b>"
-                    "<br>"
-                    "Maximum Allowed Discount: "
-                    "<b>{maximum:.2f}%</b>"
-                    "<br>"
-                    "Entered Discount: "
-                    "<b>{entered:.2f}%</b>"
-                ).format(
-                    item=row.item_code,
-                    price_list=price_list,
-                    buying=buying_rate,
-                    selling=selling_rate,
-                    margin=minimum_margin,
-                    maximum=max_discount,
-                    entered=discount,
-                )
+                f"<b>Discount exceeds the allowed limit</b>"
+                f"<br><br>"
+                f"Item: <b>{row.item_code}</b>"
+                f"<br>"
+                f"Price List: <b>{price_list}</b>"
+                f"<br>"
+                f"Standard Buying Rate: "
+                f"<b>{buying_rate:.2f}</b>"
+                f"<br>"
+                f"Price List Rate: "
+                f"<b>{selling_rate:.2f}</b>"
+                f"<br>"
+                f"Minimum Required Margin: "
+                f"<b>{minimum_margin:.2f}%</b>"
+                f"<br>"
+                f"Maximum Allowed Discount: "
+                f"<b>{max_discount:.2f}%</b>"
+                f"<br>"
+                f"Entered Discount: "
+                f"<b>{discount:.2f}%</b>"
             )
 
 
@@ -233,10 +268,10 @@ def get_buying_prices_for_document(items):
     Fetch Standard Buying prices once for all item codes
     in the current document.
 
-    Matching is done using:
+    Matching:
         Item Code + UOM + Batch
 
-    This function performs ONE database query.
+    One database query per document.
     """
 
     item_codes = {
@@ -270,7 +305,10 @@ def get_buying_prices_for_document(items):
     result = {}
 
     for price in prices:
-        rate = get_number(price.price_list_rate)
+
+        rate = get_number(
+            price.price_list_rate
+        )
 
         if rate is None or rate <= 0:
             continue
@@ -281,14 +319,18 @@ def get_buying_prices_for_document(items):
             price.batch_no,
         )
 
-        # Keep the newest matching Item Price.
+        # Keep newest matching Item Price.
         if key not in result:
             result[key] = rate
 
     return result
 
 
-def make_price_key(item_code, uom=None, batch_no=None):
+def make_price_key(
+    item_code,
+    uom=None,
+    batch_no=None,
+):
     return (
         item_code or "",
         uom or "",
@@ -301,11 +343,15 @@ def get_selling_rate(row):
         row.price_list_rate
     )
 
-    if price_list_rate is not None:
-        if price_list_rate > 0:
-            return price_list_rate
+    if (
+        price_list_rate is not None
+        and price_list_rate > 0
+    ):
+        return price_list_rate
 
-    rate = get_number(row.rate)
+    rate = get_number(
+        row.rate
+    )
 
     if rate is not None and rate > 0:
         return rate
