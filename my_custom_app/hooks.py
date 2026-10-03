@@ -6,13 +6,6 @@ app_email = "your-email@example.com"
 app_license = "MIT"
 
 
-doctype_js = {
-    "Quotation": "public/js/transaction_pricing.js",
-    "Sales Order": "public/js/transaction_pricing.js",
-    "Sales Invoice": "public/js/transaction_pricing.js",
-}
-
-
 doc_events = {
     "Item Price": {
         "after_insert": (
