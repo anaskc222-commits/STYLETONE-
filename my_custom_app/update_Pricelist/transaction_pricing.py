@@ -2,6 +2,10 @@ import frappe
 from frappe.utils import flt
 
 
+# ----------------------------------------------------------------------
+# SETTINGS
+# ----------------------------------------------------------------------
+
 SOURCE_PRICE_LIST = "Standard Buying"
 
 
@@ -35,12 +39,11 @@ def validate_discount_limit(doc, method=None):
         POS
 
     Database usage:
-        Maximum ONE Item Price query per document,
-        and only when validation is actually needed.
+        Maximum ONE Item Price query per document.
     """
 
     # --------------------------------------------------------------
-    # 1. Ignore POS transactions
+    # 1. Skip POS
     # --------------------------------------------------------------
 
     if (
@@ -51,7 +54,7 @@ def validate_discount_limit(doc, method=None):
         return
 
     # --------------------------------------------------------------
-    # 2. Only validate the three custom selling price lists
+    # 2. Only target selling price lists
     # --------------------------------------------------------------
 
     selling_price_list = doc.get("selling_price_list")
@@ -75,7 +78,7 @@ def validate_discount_limit(doc, method=None):
         return
 
     # --------------------------------------------------------------
-    # 4. Check whether a buying-price lookup is actually needed
+    # 4. Determine whether buying prices are required
     #
     # No discount + no 999 = no database query.
     # --------------------------------------------------------------
@@ -83,8 +86,8 @@ def validate_discount_limit(doc, method=None):
     needs_buying_prices = False
 
     for row in items:
-        discount = flt(row.get("discount_percentage"))
 
+        discount = flt(row.get("discount_percentage"))
         custom_code = flt(row.get("custom_code"))
 
         if discount > 0 or custom_code == SPECIAL_ZERO_MARGIN_CODE:
@@ -95,13 +98,13 @@ def validate_discount_limit(doc, method=None):
         return
 
     # --------------------------------------------------------------
-    # 5. ONE database query
+    # 5. ONE DATABASE QUERY
     # --------------------------------------------------------------
 
     buying_prices = get_buying_prices_for_document(items)
 
     # --------------------------------------------------------------
-    # 6. Validate rows
+    # 6. Validate all rows in memory
     # --------------------------------------------------------------
 
     problems = []
@@ -111,9 +114,9 @@ def validate_discount_limit(doc, method=None):
         discount = flt(row.get("discount_percentage"))
         custom_code = flt(row.get("custom_code"))
 
-        # ----------------------------------------------------------
-        # Normal rows
-        # ----------------------------------------------------------
+        # ==========================================================
+        # NORMAL DISCOUNT VALIDATION
+        # ==========================================================
 
         if custom_code != SPECIAL_ZERO_MARGIN_CODE:
 
@@ -123,41 +126,67 @@ def validate_discount_limit(doc, method=None):
 
             selling_rate = flt(row.get("rate"))
 
+            # ------------------------------------------------------
+            # Selling rate missing
+            # ------------------------------------------------------
+
             if selling_rate <= 0:
+
                 problems.append({
                     "item_code": row.get("item_code"),
                     "selling_rate": selling_rate,
                     "discount": discount,
                     "reason": "Selling rate is missing or zero",
                 })
+
                 continue
+
+            # ------------------------------------------------------
+            # Find Standard Buying price
+            # ------------------------------------------------------
 
             key = make_price_key(row)
 
-            buying_rate = flt(buying_prices.get(key))
+            buying_rate = flt(
+                buying_prices.get(key)
+            )
+
+            # ------------------------------------------------------
+            # Buying price not found
+            # ------------------------------------------------------
 
             if buying_rate <= 0:
+
                 problems.append({
                     "item_code": row.get("item_code"),
                     "selling_rate": selling_rate,
                     "discount": discount,
                     "reason": "Standard Buying price not found",
                 })
+
                 continue
 
-            price_list_rate = flt(row.get("price_list_rate"))
+            # ------------------------------------------------------
+            # Price List Rate
+            # ------------------------------------------------------
+
+            price_list_rate = flt(
+                row.get("price_list_rate")
+            )
 
             if price_list_rate <= 0:
+
                 problems.append({
                     "item_code": row.get("item_code"),
                     "selling_rate": selling_rate,
                     "discount": discount,
                     "reason": "Price List Rate is missing or zero",
                 })
+
                 continue
 
             # ------------------------------------------------------
-            # Minimum selling price
+            # Minimum selling rate
             # ------------------------------------------------------
 
             minimum_selling_rate = buying_rate * (
@@ -165,7 +194,7 @@ def validate_discount_limit(doc, method=None):
             )
 
             # ------------------------------------------------------
-            # Maximum permitted discount
+            # Maximum allowed discount
             # ------------------------------------------------------
 
             maximum_discount = (
@@ -173,10 +202,13 @@ def validate_discount_limit(doc, method=None):
                 / price_list_rate
             ) * 100
 
-            maximum_discount = max(maximum_discount, 0)
+            maximum_discount = max(
+                maximum_discount,
+                0
+            )
 
             # ------------------------------------------------------
-            # Discount exceeds allowed amount
+            # Discount too high
             # ------------------------------------------------------
 
             if discount > maximum_discount + 0.0001:
@@ -191,11 +223,9 @@ def validate_discount_limit(doc, method=None):
                     ),
                 })
 
-        # ----------------------------------------------------------
+        # ==========================================================
         # SPECIAL CODE 999
-        #
-        # Allows selling exactly at Standard Buying price.
-        # ----------------------------------------------------------
+        # ==========================================================
 
         else:
 
@@ -203,10 +233,12 @@ def validate_discount_limit(doc, method=None):
 
             key = make_price_key(row)
 
-            buying_rate = flt(buying_prices.get(key))
+            buying_rate = flt(
+                buying_prices.get(key)
+            )
 
             # ------------------------------------------------------
-            # Buying price missing
+            # Buying price not found
             # ------------------------------------------------------
 
             if buying_rate <= 0:
@@ -221,7 +253,7 @@ def validate_discount_limit(doc, method=None):
                 continue
 
             # ------------------------------------------------------
-            # Selling rate invalid
+            # Selling rate missing
             # ------------------------------------------------------
 
             if selling_rate <= 0:
@@ -252,13 +284,11 @@ def validate_discount_limit(doc, method=None):
 
             # ------------------------------------------------------
             # Recalculate actual discount
-            #
-            # ERPNext discount formula:
-            #
-            # (price_list_rate - rate) / price_list_rate * 100
             # ------------------------------------------------------
 
-            price_list_rate = flt(row.get("price_list_rate"))
+            price_list_rate = flt(
+                row.get("price_list_rate")
+            )
 
             if price_list_rate > 0:
 
@@ -271,14 +301,14 @@ def validate_discount_limit(doc, method=None):
                 row.rate = buying_rate
 
     # --------------------------------------------------------------
-    # 7. If everything is valid, stop
+    # 7. Everything valid
     # --------------------------------------------------------------
 
     if not problems:
         return
 
     # --------------------------------------------------------------
-    # 8. Show native Frappe table
+    # 8. Show native Frappe table and stop save
     # --------------------------------------------------------------
 
     show_margin_error(
@@ -294,15 +324,22 @@ def validate_discount_limit(doc, method=None):
 
 def get_buying_prices_for_document(items):
     """
-    Get all required Standard Buying prices in ONE database query.
+    Get Standard Buying prices for ALL document items
+    using ONE database query.
 
-    Matching:
-        Item Code
-        UOM
-        Batch No
+    Matching priority:
 
-    Latest Item Price wins.
+        1. Item + UOM + Batch
+        2. Item + UOM + blank Batch
+        3. Item + blank UOM + Batch
+        4. Item + blank UOM + blank Batch
+
+    All matching after the query happens in memory.
     """
+
+    # --------------------------------------------------------------
+    # Collect unique item codes
+    # --------------------------------------------------------------
 
     item_codes = list({
         row.get("item_code")
@@ -312,6 +349,10 @@ def get_buying_prices_for_document(items):
 
     if not item_codes:
         return {}
+
+    # ==============================================================
+    # ONE DATABASE QUERY
+    # ==============================================================
 
     price_rows = frappe.get_all(
         "Item Price",
@@ -330,33 +371,148 @@ def get_buying_prices_for_document(items):
         limit_page_length=0,
     )
 
-    result = {}
+    # --------------------------------------------------------------
+    # Group Item Prices by Item Code
+    # --------------------------------------------------------------
+
+    prices_by_item = {}
 
     for price in price_rows:
 
-        key = (
-            price.item_code or "",
-            price.uom or "",
-            price.batch_no or "",
+        item_code = price.item_code
+
+        if not item_code:
+            continue
+
+        prices_by_item.setdefault(
+            item_code,
+            []
+        ).append(price)
+
+    # --------------------------------------------------------------
+    # Match each transaction row
+    # --------------------------------------------------------------
+
+    result = {}
+
+    for row in items:
+
+        item_code = row.get("item_code")
+
+        if not item_code:
+            continue
+
+        row_uom = row.get("uom") or ""
+        row_batch = row.get("batch_no") or ""
+
+        candidates = prices_by_item.get(
+            item_code,
+            []
         )
 
-        # First/latest record wins
-        if key not in result:
-            result[key] = flt(price.price_list_rate)
+        if not candidates:
+            continue
+
+        selected_price = None
+
+        # ==========================================================
+        # PRIORITY 1
+        # EXACT ITEM + UOM + BATCH
+        # ==========================================================
+
+        for price in candidates:
+
+            price_uom = price.uom or ""
+            price_batch = price.batch_no or ""
+
+            if (
+                price_uom == row_uom
+                and price_batch == row_batch
+            ):
+                selected_price = price
+                break
+
+        # ==========================================================
+        # PRIORITY 2
+        # SAME ITEM + SAME UOM + BLANK BATCH
+        #
+        # This is the important fallback you requested.
+        # ==========================================================
+
+        if selected_price is None:
+
+            for price in candidates:
+
+                price_uom = price.uom or ""
+                price_batch = price.batch_no or ""
+
+                if (
+                    price_uom == row_uom
+                    and not price_batch
+                ):
+                    selected_price = price
+                    break
+
+        # ==========================================================
+        # PRIORITY 3
+        # SAME ITEM + BLANK UOM + SAME BATCH
+        # ==========================================================
+
+        if selected_price is None:
+
+            for price in candidates:
+
+                price_uom = price.uom or ""
+                price_batch = price.batch_no or ""
+
+                if (
+                    not price_uom
+                    and price_batch == row_batch
+                ):
+                    selected_price = price
+                    break
+
+        # ==========================================================
+        # PRIORITY 4
+        # SAME ITEM + BLANK UOM + BLANK BATCH
+        # ==========================================================
+
+        if selected_price is None:
+
+            for price in candidates:
+
+                price_uom = price.uom or ""
+                price_batch = price.batch_no or ""
+
+                if (
+                    not price_uom
+                    and not price_batch
+                ):
+                    selected_price = price
+                    break
+
+        # ----------------------------------------------------------
+        # Store selected price against THIS transaction row
+        # ----------------------------------------------------------
+
+        if selected_price is not None:
+
+            result[
+                make_price_key(row)
+            ] = flt(
+                selected_price.price_list_rate
+            )
 
     return result
 
 
 # ----------------------------------------------------------------------
-# PRICE KEY
+# MAKE PRICE KEY
 # ----------------------------------------------------------------------
 
 def make_price_key(row):
     """
-    Match Item Price using:
-        Item Code
-        UOM
-        Batch No
+    Key for the current transaction row.
     """
 
     return (
@@ -367,7 +523,7 @@ def make_price_key(row):
 
 
 # ----------------------------------------------------------------------
-# NATIVE FRAPPE ERROR TABLE
+# DISPLAY ERROR
 # ----------------------------------------------------------------------
 
 def show_margin_error(
@@ -376,9 +532,10 @@ def show_margin_error(
     minimum_margin,
 ):
     """
-    Display validation errors using Frappe's native table renderer.
+    Show only failed items.
 
-    Buying Rate is intentionally NOT displayed.
+    Buying Rate is intentionally hidden.
+    Uses native Frappe table rendering.
     """
 
     table = [
