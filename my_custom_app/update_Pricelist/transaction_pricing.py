@@ -17,139 +17,143 @@ TARGET_PRICE_LISTS = set(MINIMUM_MARGIN_PERCENT)
 
 def validate_discount_limit(doc, method=None):
     """
-    Validate discounts for custom selling Price Lists.
+    Validate discounts for the three custom selling Price Lists.
 
     B2B WHOLESALE  -> minimum 5% margin
     SALOON         -> minimum 7% margin
     BEAUTY PARLOUR -> minimum 10% margin
 
     custom_code = 999:
-        Allows selling at Standard Buying price.
-        The actual discount is recalculated automatically.
+        Sell at Standard Buying price.
+        Actual discount is recalculated automatically.
 
-    Important:
-    - Standard Selling is untouched.
-    - POS is untouched.
-    - No DB query when validation is not required.
-    - Maximum ONE Item Price query per document.
+    Standard Selling and POS are completely ignored.
     """
 
-    # ---------------------------------------------------------------
+    # ---------------------------------------------------------
     # 1. Ignore POS
-    # ---------------------------------------------------------------
-    if doc.get("is_pos") or doc.get("pos_profile") or doc.get("pos_opening_shift"):
+    # ---------------------------------------------------------
+    if (
+        doc.get("is_pos")
+        or doc.get("pos_profile")
+        or doc.get("pos_opening_shift")
+    ):
         return
 
-    # ---------------------------------------------------------------
-    # 2. Only validate the three custom selling price lists
-    # ---------------------------------------------------------------
+    # ---------------------------------------------------------
+    # 2. Only custom selling price lists
+    # ---------------------------------------------------------
     selling_price_list = doc.get("selling_price_list")
 
     if selling_price_list not in TARGET_PRICE_LISTS:
         return
 
-    # ---------------------------------------------------------------
-    # 3. Find whether buying prices are actually required
-    # ---------------------------------------------------------------
+    # ---------------------------------------------------------
+    # 3. Determine whether buying prices are needed
+    # ---------------------------------------------------------
     items = []
     needs_buying_prices = False
 
     for row in doc.get("items") or []:
-        item_code = row.get("item_code")
 
-        if not item_code:
+        if not row.get("item_code"):
             continue
 
         discount = flt(row.get("discount_percentage"))
-
         custom_code = flt(row.get("custom_code"))
-
-        # Only query buying prices when:
-        # - discount exists, OR
-        # - special 999 code is used
-        if discount > 0 or custom_code == SPECIAL_ZERO_MARGIN_CODE:
-            needs_buying_prices = True
 
         items.append(row)
 
-    # No discount / no 999 = nothing to validate
+        if discount > 0 or custom_code == SPECIAL_ZERO_MARGIN_CODE:
+            needs_buying_prices = True
+
+    # No discount and no 999 code
+    # Therefore no DB query is necessary.
     if not needs_buying_prices:
         return
 
-    # ---------------------------------------------------------------
-    # 4. ONE DB QUERY ONLY
-    # ---------------------------------------------------------------
+    # ---------------------------------------------------------
+    # 4. ONE DB QUERY
+    # ---------------------------------------------------------
     buying_prices = get_buying_prices_for_document(items)
 
-    # ---------------------------------------------------------------
-    # 5. Validate and collect ONLY problematic items
-    # ---------------------------------------------------------------
-    problems = []
-
+    # ---------------------------------------------------------
+    # 5. Validate
+    # ---------------------------------------------------------
     minimum_margin = MINIMUM_MARGIN_PERCENT[selling_price_list]
+
+    problems = []
 
     for row in items:
 
         discount = flt(row.get("discount_percentage"))
         custom_code = flt(row.get("custom_code"))
 
-        # -----------------------------------------------------------
-        # Ignore rows that don't need validation
-        # -----------------------------------------------------------
+        # Nothing to validate
         if discount <= 0 and custom_code != SPECIAL_ZERO_MARGIN_CODE:
             continue
 
         item_code = row.get("item_code") or ""
 
-        buying_rate = buying_prices.get(
-            make_price_key(row),
-            0.0
+        price_key = make_price_key(row)
+
+        buying_rate = flt(
+            buying_prices.get(price_key, 0.0)
         )
 
         selling_rate = get_selling_rate(row)
 
-        # ===========================================================
+        # =====================================================
         # SPECIAL CODE 999
-        # ===========================================================
+        # =====================================================
         if custom_code == SPECIAL_ZERO_MARGIN_CODE:
 
-            # Buying price missing
+            # No buying price
             if buying_rate <= 0:
+
                 problems.append({
                     "item_code": item_code,
                     "buying_rate": 0.0,
                     "selling_rate": selling_rate,
                     "discount": discount,
-                    "reason": "Standard Buying price not found"
+                    "reason": "Standard Buying price not found",
                 })
+
                 continue
 
-            # Selling rate missing
+            # No selling rate
             if selling_rate <= 0:
+
                 problems.append({
                     "item_code": item_code,
                     "buying_rate": buying_rate,
                     "selling_rate": selling_rate,
                     "discount": discount,
-                    "reason": "Selling rate is 0"
+                    "reason": "Selling rate is 0",
                 })
+
                 continue
 
-            # Cannot sell below buying price
+            # Selling below buying
             if selling_rate < buying_rate:
+
                 problems.append({
                     "item_code": item_code,
                     "buying_rate": buying_rate,
                     "selling_rate": selling_rate,
                     "discount": discount,
-                    "reason": "Selling below Standard Buying price"
+                    "reason": "Selling below Standard Buying price",
                 })
+
                 continue
 
-            # Calculate actual discount from buying price
-            price_list_rate = flt(row.get("price_list_rate"))
+            # Recalculate actual discount
+            price_list_rate = flt(
+                row.get("price_list_rate")
+            )
 
             if price_list_rate > 0:
+
                 actual_discount = (
                     (price_list_rate - buying_rate)
                     / price_list_rate
@@ -160,71 +164,83 @@ def validate_discount_limit(doc, method=None):
 
             continue
 
-        # ===========================================================
-        # NORMAL DISCOUNT VALIDATION
-        # ===========================================================
+        # =====================================================
+        # NORMAL DISCOUNT
+        # =====================================================
 
-        # No discount = nothing to validate
         if discount <= 0:
             continue
 
         # Selling rate missing
         if selling_rate <= 0:
+
             problems.append({
                 "item_code": item_code,
                 "buying_rate": buying_rate,
                 "selling_rate": selling_rate,
                 "discount": discount,
-                "reason": "Selling rate is 0"
+                "reason": "Selling rate is 0",
             })
+
             continue
 
         # Buying price missing
         if buying_rate <= 0:
+
             problems.append({
                 "item_code": item_code,
                 "buying_rate": 0.0,
                 "selling_rate": selling_rate,
                 "discount": discount,
-                "reason": "Standard Buying price not found"
+                "reason": "Standard Buying price not found",
             })
+
             continue
 
-        # -----------------------------------------------------------
-        # Minimum allowed selling rate
-        #
-        # Example:
-        # Buying = 100
-        # Minimum margin = 5%
-        # Minimum selling rate = 105
-        # -----------------------------------------------------------
-        minimum_selling_rate = buying_rate * (
-            1 + minimum_margin / 100
+        # -----------------------------------------------------
+        # Price List Rate
+        # -----------------------------------------------------
+        price_list_rate = flt(
+            row.get("price_list_rate")
         )
 
-        price_list_rate = flt(row.get("price_list_rate"))
-
         if price_list_rate <= 0:
+
             problems.append({
                 "item_code": item_code,
                 "buying_rate": buying_rate,
                 "selling_rate": selling_rate,
                 "discount": discount,
-                "reason": "Price List Rate is 0"
+                "reason": "Price List Rate is 0",
             })
+
             continue
 
+        # -----------------------------------------------------
+        # Minimum selling price
+        # -----------------------------------------------------
+        minimum_selling_rate = buying_rate * (
+            1 + minimum_margin / 100
+        )
+
+        # -----------------------------------------------------
         # Maximum discount allowed
+        # -----------------------------------------------------
         maximum_discount = (
             (price_list_rate - minimum_selling_rate)
             / price_list_rate
         ) * 100
 
-        # Prevent negative maximum discount
-        maximum_discount = max(0.0, maximum_discount)
+        maximum_discount = max(
+            0.0,
+            maximum_discount
+        )
 
-        # Small floating-point tolerance
+        # -----------------------------------------------------
+        # Check discount
+        # -----------------------------------------------------
         if discount > maximum_discount + 0.0001:
+
             problems.append({
                 "item_code": item_code,
                 "buying_rate": buying_rate,
@@ -233,39 +249,41 @@ def validate_discount_limit(doc, method=None):
                 "reason": (
                     f"Maximum allowed discount is "
                     f"{maximum_discount:.2f}%"
-                )
-            )
+                ),
+            })
 
-    # ---------------------------------------------------------------
-    # 6. If everything is valid, simply allow Save/Submit
-    # ---------------------------------------------------------------
+    # ---------------------------------------------------------
+    # 6. Everything is valid
+    # ---------------------------------------------------------
     if not problems:
         return
 
-    # ---------------------------------------------------------------
-    # 7. Show ONLY problematic items
-    # ---------------------------------------------------------------
+    # ---------------------------------------------------------
+    # 7. Show only problematic items
+    # ---------------------------------------------------------
     message = build_error_table(
         problems,
         selling_price_list,
-        minimum_margin
+        minimum_margin,
     )
 
     frappe.throw(message)
 
 
-# ==================================================================
+# =================================================================
 # BUYING PRICE QUERY
-# ==================================================================
+# =================================================================
 
 def get_buying_prices_for_document(items):
     """
-    Fetch all required Standard Buying prices in ONE DB query.
+    Fetch Standard Buying prices using ONE database query.
 
-    Returns:
-        {
-            (item_code, uom, batch_no): rate
-        }
+    Matching:
+        Item Code
+        UOM
+        Batch No
+
+    Newest Item Price wins.
     """
 
     item_codes = list({
@@ -304,23 +322,19 @@ def get_buying_prices_for_document(items):
             price.batch_no or "",
         )
 
-        # Because rows are ordered newest first,
-        # first matching record wins.
         if key not in result:
-            result[key] = flt(price.price_list_rate)
+            result[key] = flt(
+                price.price_list_rate
+            )
 
     return result
 
 
-# ==================================================================
+# =================================================================
 # PRICE KEY
-# ==================================================================
+# =================================================================
 
 def make_price_key(row):
-    """
-    Match Item Price using:
-        Item Code + UOM + Batch No
-    """
 
     return (
         row.get("item_code") or "",
@@ -329,57 +343,77 @@ def make_price_key(row):
     )
 
 
-# ==================================================================
+# =================================================================
 # SELLING RATE
-# ==================================================================
+# =================================================================
 
 def get_selling_rate(row):
-    """
-    Get the actual transaction selling rate.
-    """
 
-    return flt(row.get("rate"))
+    return flt(
+        row.get("rate")
+    )
 
 
-# ==================================================================
+# =================================================================
 # ERROR TABLE
-# ==================================================================
+# =================================================================
 
-def build_error_table(problems, selling_price_list, minimum_margin):
+def build_error_table(
+    problems,
+    selling_price_list,
+    minimum_margin,
+):
 
     rows = []
 
     for problem in problems:
 
+        item_code = frappe.utils.escape_html(
+            str(problem["item_code"])
+        )
+
+        reason = frappe.utils.escape_html(
+            str(problem["reason"])
+        )
+
         rows.append(
             f"""
             <tr>
-                <td>{frappe.utils.escape_html(problem["item_code"])}</td>
+                <td>{item_code}</td>
+
                 <td style="text-align:right;">
                     {problem["buying_rate"]:.2f}
                 </td>
+
                 <td style="text-align:right;">
                     {problem["selling_rate"]:.2f}
                 </td>
+
                 <td style="text-align:right;">
                     {problem["discount"]:.2f}%
                 </td>
+
                 <td>
-                    {frappe.utils.escape_html(problem["reason"])}
+                    {reason}
                 </td>
             </tr>
             """
         )
 
-    table = f"""
+    price_list = frappe.utils.escape_html(
+        str(selling_price_list)
+    )
+
+    return f"""
         <div>
+
             <p>
                 <b>Discount validation failed</b>
             </p>
 
             <p>
                 Price List:
-                <b>{frappe.utils.escape_html(selling_price_list)}</b>
+                <b>{price_list}</b>
                 <br>
                 Required minimum margin:
                 <b>{minimum_margin:.2f}%</b>
@@ -389,6 +423,7 @@ def build_error_table(problems, selling_price_list, minimum_margin):
                 class="table table-bordered"
                 style="width:100%;"
             >
+
                 <thead>
                     <tr>
                         <th>Item</th>
@@ -402,8 +437,8 @@ def build_error_table(problems, selling_price_list, minimum_margin):
                 <tbody>
                     {''.join(rows)}
                 </tbody>
+
             </table>
+
         </div>
     """
-
-    return table
