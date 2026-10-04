@@ -483,4 +483,29 @@ def build_error_table(
         )
 
     price_list = frappe.utils.escape_html(
-        str(selling_price_list
+        str(selling_price_list)
+    )
+
+    table_rows = "".join(rows)
+
+    return f"""
+    <div style="font-family: inherit;">
+        <p style="margin-bottom: 12px; font-weight: 500;">
+            Margin validation failed for <b>{price_list}</b> (Minimum required margin: <b>{minimum_margin}%</b>):
+        </p>
+        <table style="width:100%; border-collapse:collapse; font-size:12px;">
+            <thead>
+                <tr style="background-color: #f7f9fa;">
+                    <th style="padding:10px 12px; border:1px solid #d1d8dd; text-align:left;">Item Code</th>
+                    <th style="padding:10px 12px; border:1px solid #d1d8dd; text-align:right;">Buying Rate</th>
+                    <th style="padding:10px 12px; border:1px solid #d1d8dd; text-align:right;">Selling Rate</th>
+                    <th style="padding:10px 12px; border:1px solid #d1d8dd; text-align:right;">Discount</th>
+                    <th style="padding:10px 12px; border:1px solid #d1d8dd; text-align:left;">Reason</th>
+                </tr>
+            </thead>
+            <tbody>
+                {table_rows}
+            </tbody>
+        </table>
+    </div>
+    """
