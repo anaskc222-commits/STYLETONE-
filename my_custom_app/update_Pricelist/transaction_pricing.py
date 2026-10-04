@@ -2,10 +2,6 @@ import frappe
 from frappe.utils import flt
 
 
-# =================================================================
-# SETTINGS
-# =================================================================
-
 SOURCE_PRICE_LIST = "Standard Buying"
 
 
@@ -18,370 +14,294 @@ MINIMUM_MARGIN_PERCENT = {
 
 SPECIAL_ZERO_MARGIN_CODE = 999.0
 
-
-TARGET_PRICE_LISTS = set(
-    MINIMUM_MARGIN_PERCENT
-)
+TARGET_PRICE_LISTS = set(MINIMUM_MARGIN_PERCENT)
 
 
-# =================================================================
+# ----------------------------------------------------------------------
 # MAIN VALIDATION
-# =================================================================
+# ----------------------------------------------------------------------
 
 def validate_discount_limit(doc, method=None):
     """
-    Validate discounts for custom selling Price Lists.
+    Validate selling discounts against Standard Buying price.
 
-    B2B WHOLESALE  -> minimum 5% margin
-    SALOON         -> minimum 7% margin
-    BEAUTY PARLOUR -> minimum 10% margin
+    Applies only to:
+        B2B WHOLESALE
+        SALOON
+        BEAUTY PARLOUR
 
-    custom_code = 999:
-        Allows selling at Standard Buying price.
-        Actual discount is recalculated automatically.
+    Does NOT affect:
+        Standard Selling
+        POS
 
-    Standard Selling and POS are untouched.
-
-    Performance:
-        Maximum ONE Item Price query per document.
-        No Item Price query when validation is not required.
+    Database usage:
+        Maximum ONE Item Price query per document,
+        and only when validation is actually needed.
     """
 
-    # =============================================================
-    # 1. IGNORE POS
-    # =============================================================
+    # --------------------------------------------------------------
+    # 1. Ignore POS transactions
+    # --------------------------------------------------------------
 
     if (
-        doc.get("is_pos")
-        or doc.get("pos_profile")
-        or doc.get("pos_opening_shift")
+        getattr(doc, "is_pos", 0)
+        or getattr(doc, "pos_profile", None)
+        or getattr(doc, "pos_opening_shift", None)
     ):
         return
 
-    # =============================================================
-    # 2. ONLY CUSTOM SELLING PRICE LISTS
-    # =============================================================
+    # --------------------------------------------------------------
+    # 2. Only validate the three custom selling price lists
+    # --------------------------------------------------------------
 
-    selling_price_list = doc.get(
-        "selling_price_list"
-    )
+    selling_price_list = doc.get("selling_price_list")
 
     if selling_price_list not in TARGET_PRICE_LISTS:
         return
 
-    # =============================================================
-    # 3. COLLECT ITEMS
-    # =============================================================
+    minimum_margin = MINIMUM_MARGIN_PERCENT[selling_price_list]
 
-    items = []
+    # --------------------------------------------------------------
+    # 3. Get item rows
+    # --------------------------------------------------------------
+
+    items = [
+        row
+        for row in (doc.get("items") or [])
+        if row.get("item_code")
+    ]
+
+    if not items:
+        return
+
+    # --------------------------------------------------------------
+    # 4. Check whether a buying-price lookup is actually needed
+    #
+    # No discount + no 999 = no database query.
+    # --------------------------------------------------------------
+
     needs_buying_prices = False
 
-    for row in doc.get("items") or []:
+    for row in items:
+        discount = flt(row.get("discount_percentage"))
 
-        if not row.get("item_code"):
-            continue
+        custom_code = flt(row.get("custom_code"))
 
-        discount = flt(
-            row.get("discount_percentage")
-        )
-
-        custom_code = flt(
-            row.get("custom_code")
-        )
-
-        items.append(row)
-
-        if (
-            discount > 0
-            or custom_code == SPECIAL_ZERO_MARGIN_CODE
-        ):
+        if discount > 0 or custom_code == SPECIAL_ZERO_MARGIN_CODE:
             needs_buying_prices = True
-
-    # =============================================================
-    # NO VALIDATION REQUIRED
-    # =============================================================
+            break
 
     if not needs_buying_prices:
         return
 
-    # =============================================================
-    # 4. ONE DATABASE QUERY
-    # =============================================================
+    # --------------------------------------------------------------
+    # 5. ONE database query
+    # --------------------------------------------------------------
 
-    buying_prices = get_buying_prices_for_document(
-        items
-    )
+    buying_prices = get_buying_prices_for_document(items)
 
-    minimum_margin = MINIMUM_MARGIN_PERCENT[
-        selling_price_list
-    ]
+    # --------------------------------------------------------------
+    # 6. Validate rows
+    # --------------------------------------------------------------
 
     problems = []
 
-    # =============================================================
-    # 5. VALIDATE EACH ITEM
-    # =============================================================
-
     for row in items:
 
-        discount = flt(
-            row.get("discount_percentage")
-        )
+        discount = flt(row.get("discount_percentage"))
+        custom_code = flt(row.get("custom_code"))
 
-        custom_code = flt(
-            row.get("custom_code")
-        )
+        # ----------------------------------------------------------
+        # Normal rows
+        # ----------------------------------------------------------
 
-        # ---------------------------------------------------------
-        # Nothing to validate for this row
-        # ---------------------------------------------------------
+        if custom_code != SPECIAL_ZERO_MARGIN_CODE:
 
-        if (
-            discount <= 0
-            and custom_code != SPECIAL_ZERO_MARGIN_CODE
-        ):
-            continue
+            # No discount -> nothing to validate
+            if discount <= 0:
+                continue
 
-        item_code = row.get(
-            "item_code"
-        ) or ""
+            selling_rate = flt(row.get("rate"))
 
-        buying_rate = flt(
-            buying_prices.get(
-                make_price_key(row),
-                0.0
+            if selling_rate <= 0:
+                problems.append({
+                    "item_code": row.get("item_code"),
+                    "selling_rate": selling_rate,
+                    "discount": discount,
+                    "reason": "Selling rate is missing or zero",
+                })
+                continue
+
+            key = make_price_key(row)
+
+            buying_rate = flt(buying_prices.get(key))
+
+            if buying_rate <= 0:
+                problems.append({
+                    "item_code": row.get("item_code"),
+                    "selling_rate": selling_rate,
+                    "discount": discount,
+                    "reason": "Standard Buying price not found",
+                })
+                continue
+
+            price_list_rate = flt(row.get("price_list_rate"))
+
+            if price_list_rate <= 0:
+                problems.append({
+                    "item_code": row.get("item_code"),
+                    "selling_rate": selling_rate,
+                    "discount": discount,
+                    "reason": "Price List Rate is missing or zero",
+                })
+                continue
+
+            # ------------------------------------------------------
+            # Minimum selling price
+            # ------------------------------------------------------
+
+            minimum_selling_rate = buying_rate * (
+                1 + minimum_margin / 100
             )
-        )
 
-        selling_rate = get_selling_rate(
-            row
-        )
+            # ------------------------------------------------------
+            # Maximum permitted discount
+            # ------------------------------------------------------
 
-        # =========================================================
+            maximum_discount = (
+                (price_list_rate - minimum_selling_rate)
+                / price_list_rate
+            ) * 100
+
+            maximum_discount = max(maximum_discount, 0)
+
+            # ------------------------------------------------------
+            # Discount exceeds allowed amount
+            # ------------------------------------------------------
+
+            if discount > maximum_discount + 0.0001:
+
+                problems.append({
+                    "item_code": row.get("item_code"),
+                    "selling_rate": selling_rate,
+                    "discount": discount,
+                    "reason": (
+                        f"Maximum allowed discount is "
+                        f"{maximum_discount:.2f}%"
+                    ),
+                })
+
+        # ----------------------------------------------------------
         # SPECIAL CODE 999
-        # =========================================================
+        #
+        # Allows selling exactly at Standard Buying price.
+        # ----------------------------------------------------------
 
-        if custom_code == SPECIAL_ZERO_MARGIN_CODE:
+        else:
 
-            # -----------------------------------------------------
+            selling_rate = flt(row.get("rate"))
+
+            key = make_price_key(row)
+
+            buying_rate = flt(buying_prices.get(key))
+
+            # ------------------------------------------------------
             # Buying price missing
-            # -----------------------------------------------------
+            # ------------------------------------------------------
 
             if buying_rate <= 0:
 
                 problems.append({
-                    "item_code": item_code,
-                    "buying_rate": 0.0,
+                    "item_code": row.get("item_code"),
                     "selling_rate": selling_rate,
                     "discount": discount,
-                    "reason": (
-                        "Standard Buying price not found"
-                    ),
+                    "reason": "Standard Buying price not found",
                 })
 
                 continue
 
-            # -----------------------------------------------------
-            # Selling rate missing
-            # -----------------------------------------------------
+            # ------------------------------------------------------
+            # Selling rate invalid
+            # ------------------------------------------------------
 
             if selling_rate <= 0:
 
                 problems.append({
-                    "item_code": item_code,
-                    "buying_rate": buying_rate,
+                    "item_code": row.get("item_code"),
                     "selling_rate": selling_rate,
                     "discount": discount,
-                    "reason": "Selling rate is 0",
+                    "reason": "Selling rate is missing or zero",
                 })
 
                 continue
 
-            # -----------------------------------------------------
-            # Selling below Standard Buying
-            # -----------------------------------------------------
+            # ------------------------------------------------------
+            # Cannot sell below Standard Buying
+            # ------------------------------------------------------
 
             if selling_rate < buying_rate:
 
                 problems.append({
-                    "item_code": item_code,
-                    "buying_rate": buying_rate,
+                    "item_code": row.get("item_code"),
                     "selling_rate": selling_rate,
                     "discount": discount,
-                    "reason": (
-                        "Selling below Standard Buying price"
-                    ),
+                    "reason": "Selling below Standard Buying price",
                 })
 
                 continue
 
-            # -----------------------------------------------------
+            # ------------------------------------------------------
             # Recalculate actual discount
-            # -----------------------------------------------------
+            #
+            # ERPNext discount formula:
+            #
+            # (price_list_rate - rate) / price_list_rate * 100
+            # ------------------------------------------------------
 
-            price_list_rate = flt(
-                row.get("price_list_rate")
-            )
+            price_list_rate = flt(row.get("price_list_rate"))
 
             if price_list_rate > 0:
 
                 actual_discount = (
-                    (
-                        price_list_rate
-                        - buying_rate
-                    )
+                    (price_list_rate - buying_rate)
                     / price_list_rate
                 ) * 100
 
-                row.discount_percentage = (
-                    actual_discount
-                )
-
+                row.discount_percentage = actual_discount
                 row.rate = buying_rate
 
-            continue
-
-        # =========================================================
-        # NORMAL DISCOUNT
-        # =========================================================
-
-        if discount <= 0:
-            continue
-
-        # ---------------------------------------------------------
-        # Selling rate missing
-        # ---------------------------------------------------------
-
-        if selling_rate <= 0:
-
-            problems.append({
-                "item_code": item_code,
-                "buying_rate": buying_rate,
-                "selling_rate": selling_rate,
-                "discount": discount,
-                "reason": "Selling rate is 0",
-            })
-
-            continue
-
-        # ---------------------------------------------------------
-        # Buying price missing
-        # ---------------------------------------------------------
-
-        if buying_rate <= 0:
-
-            problems.append({
-                "item_code": item_code,
-                "buying_rate": 0.0,
-                "selling_rate": selling_rate,
-                "discount": discount,
-                "reason": (
-                    "Standard Buying price not found"
-                ),
-            })
-
-            continue
-
-        # ---------------------------------------------------------
-        # Price List Rate
-        # ---------------------------------------------------------
-
-        price_list_rate = flt(
-            row.get("price_list_rate")
-        )
-
-        if price_list_rate <= 0:
-
-            problems.append({
-                "item_code": item_code,
-                "buying_rate": buying_rate,
-                "selling_rate": selling_rate,
-                "discount": discount,
-                "reason": "Price List Rate is 0",
-            })
-
-            continue
-
-        # ---------------------------------------------------------
-        # Minimum selling rate
-        # ---------------------------------------------------------
-
-        minimum_selling_rate = (
-            buying_rate
-            * (
-                1
-                + minimum_margin / 100
-            )
-        )
-
-        # ---------------------------------------------------------
-        # Maximum allowed discount
-        # ---------------------------------------------------------
-
-        maximum_discount = (
-            (
-                price_list_rate
-                - minimum_selling_rate
-            )
-            / price_list_rate
-        ) * 100
-
-        maximum_discount = max(
-            0.0,
-            maximum_discount
-        )
-
-        # ---------------------------------------------------------
-        # Check discount
-        # ---------------------------------------------------------
-
-        if discount > maximum_discount + 0.0001:
-
-            problems.append({
-                "item_code": item_code,
-                "buying_rate": buying_rate,
-                "selling_rate": selling_rate,
-                "discount": discount,
-                "reason": (
-                    f"Maximum allowed discount is "
-                    f"{maximum_discount:.2f}%"
-                ),
-            })
-
-    # =============================================================
-    # 6. EVERYTHING VALID
-    # =============================================================
+    # --------------------------------------------------------------
+    # 7. If everything is valid, stop
+    # --------------------------------------------------------------
 
     if not problems:
         return
 
-    # =============================================================
-    # 7. SHOW ONLY PROBLEMATIC ITEMS
-    # =============================================================
+    # --------------------------------------------------------------
+    # 8. Show native Frappe table
+    # --------------------------------------------------------------
 
-    message = build_error_table(
+    show_margin_error(
         problems,
         selling_price_list,
         minimum_margin,
     )
 
-    frappe.throw(message)
 
-
-# =================================================================
+# ----------------------------------------------------------------------
 # GET STANDARD BUYING PRICES
-# =================================================================
+# ----------------------------------------------------------------------
 
 def get_buying_prices_for_document(items):
     """
-    Fetch Standard Buying prices in ONE database query.
+    Get all required Standard Buying prices in ONE database query.
 
-    Match:
+    Matching:
         Item Code
         UOM
         Batch No
 
-    Newest Item Price wins.
+    Latest Item Price wins.
     """
 
     item_codes = list({
@@ -420,21 +340,24 @@ def get_buying_prices_for_document(items):
             price.batch_no or "",
         )
 
-        # Newest matching price wins
+        # First/latest record wins
         if key not in result:
-
-            result[key] = flt(
-                price.price_list_rate
-            )
+            result[key] = flt(price.price_list_rate)
 
     return result
 
 
-# =================================================================
+# ----------------------------------------------------------------------
 # PRICE KEY
-# =================================================================
+# ----------------------------------------------------------------------
 
 def make_price_key(row):
+    """
+    Match Item Price using:
+        Item Code
+        UOM
+        Batch No
+    """
 
     return (
         row.get("item_code") or "",
@@ -443,223 +366,47 @@ def make_price_key(row):
     )
 
 
-# =================================================================
-# SELLING RATE
-# =================================================================
+# ----------------------------------------------------------------------
+# NATIVE FRAPPE ERROR TABLE
+# ----------------------------------------------------------------------
 
-def get_selling_rate(row):
-
-    return flt(
-        row.get("rate")
-    )
-
-
-# =================================================================
-# ERROR UI
-# =================================================================
-
-def build_error_table(
+def show_margin_error(
     problems,
     selling_price_list,
     minimum_margin,
 ):
     """
-    Compact ERPNext-style validation UI.
+    Display validation errors using Frappe's native table renderer.
 
     Buying Rate is intentionally NOT displayed.
-    It is still used internally for validation.
     """
 
-    price_list = frappe.utils.escape_html(
-        str(selling_price_list)
-    )
-
-    rows = []
+    table = [
+        [
+            "Item",
+            "Selling Rate",
+            "Discount",
+            "Reason",
+        ]
+    ]
 
     for problem in problems:
 
-        item_code = frappe.utils.escape_html(
-            str(problem["item_code"])
-        )
+        table.append([
+            problem["item_code"],
+            f'{flt(problem["selling_rate"]):.2f}',
+            f'{flt(problem["discount"]):.2f}%',
+            problem["reason"],
+        ])
 
-        reason = frappe.utils.escape_html(
-            str(problem["reason"])
-        )
-
-        selling_rate = (
-            f'{problem["selling_rate"]:.2f}'
-        )
-
-        discount = (
-            f'{problem["discount"]:.2f}%'
-        )
-
-        rows.append(
-            f"""
-            <tr>
-
-                <td style="
-                    padding:8px 10px;
-                    border-bottom:1px solid #e5e7eb;
-                    text-align:left;
-                    font-weight:500;
-                    white-space:nowrap;
-                ">
-                    {item_code}
-                </td>
-
-                <td style="
-                    padding:8px 10px;
-                    border-bottom:1px solid #e5e7eb;
-                    text-align:right;
-                    white-space:nowrap;
-                ">
-                    {selling_rate}
-                </td>
-
-                <td style="
-                    padding:8px 10px;
-                    border-bottom:1px solid #e5e7eb;
-                    text-align:right;
-                    white-space:nowrap;
-                ">
-                    {discount}
-                </td>
-
-                <td style="
-                    padding:8px 10px;
-                    border-bottom:1px solid #e5e7eb;
-                    text-align:left;
-                    color:#6b7280;
-                    line-height:1.4;
-                    min-width:190px;
-                ">
-                    {reason}
-                </td>
-
-            </tr>
-            """
-        )
-
-    table_rows = "".join(rows)
-
-    return f"""
-    <div style="
-        font-family:inherit;
-        width:100%;
-        box-sizing:border-box;
-    ">
-
-        <div style="
-            margin-bottom:12px;
-            line-height:1.45;
-        ">
-
-            <div style="
-                font-size:14px;
-                font-weight:600;
-                color:#36414c;
-                margin-bottom:4px;
-            ">
-                Margin validation failed
-            </div>
-
-            <div style="
-                font-size:13px;
-                color:#6b7280;
-            ">
-                Price List:
-                <b style="color:#36414c;">
-                    {price_list}
-                </b>
-
-                <span style="margin:0 4px;">
-                    ·
-                </span>
-
-                Minimum margin:
-                <b style="color:#36414c;">
-                    {minimum_margin:.0f}%
-                </b>
-            </div>
-
-        </div>
-
-        <div style="
-            width:100%;
-            overflow-x:auto;
-            -webkit-overflow-scrolling:touch;
-            border:1px solid #d1d8dd;
-            border-radius:6px;
-            background:#ffffff;
-        ">
-
-            <table style="
-                width:100%;
-                min-width:560px;
-                border-collapse:collapse;
-                table-layout:auto;
-                font-size:12px;
-                color:#36414c;
-            ">
-
-                <thead>
-
-                    <tr style="
-                        background:#f7f9fa;
-                    ">
-
-                        <th style="
-                            padding:8px 10px;
-                            border-bottom:1px solid #d1d8dd;
-                            text-align:left;
-                            font-weight:600;
-                            white-space:nowrap;
-                        ">
-                            Item
-                        </th>
-
-                        <th style="
-                            padding:8px 10px;
-                            border-bottom:1px solid #d1d8dd;
-                            text-align:right;
-                            font-weight:600;
-                            white-space:nowrap;
-                        ">
-                            Selling Rate
-                        </th>
-
-                        <th style="
-                            padding:8px 10px;
-                            border-bottom:1px solid #d1d8dd;
-                            text-align:right;
-                            font-weight:600;
-                            white-space:nowrap;
-                        ">
-                            Discount
-                        </th>
-
-                        <th style="
-                            padding:8px 10px;
-                            border-bottom:1px solid #d1d8dd;
-                            text-align:left;
-                            font-weight:600;
-                            white-space:nowrap;
-                        ">
-                            Reason
-                        </th>
-
-                    </tr>
-
-                </thead>
-
-                <tbody>
-                    {table_rows}
-                </tbody>
-
-            </table>
-
-        </div>
-
-    </div>
-    """
+    frappe.msgprint(
+        table,
+        title=(
+            f"Margin validation failed — "
+            f"{selling_price_list} "
+            f"(Minimum margin: {minimum_margin:.0f}%)"
+        ),
+        indicator="red",
+        as_table=True,
+        raise_exception=True,
+    )
