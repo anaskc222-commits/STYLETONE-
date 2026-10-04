@@ -2,7 +2,12 @@ import frappe
 from frappe.utils import flt
 
 
+# =================================================================
+# SETTINGS
+# =================================================================
+
 SOURCE_PRICE_LIST = "Standard Buying"
+
 
 MINIMUM_MARGIN_PERCENT = {
     "B2B WHOLESALE": 5.0,
@@ -10,10 +15,18 @@ MINIMUM_MARGIN_PERCENT = {
     "BEAUTY PARLOUR": 10.0,
 }
 
+
 SPECIAL_ZERO_MARGIN_CODE = 999.0
 
-TARGET_PRICE_LISTS = set(MINIMUM_MARGIN_PERCENT)
 
+TARGET_PRICE_LISTS = set(
+    MINIMUM_MARGIN_PERCENT
+)
+
+
+# =================================================================
+# MAIN VALIDATION
+# =================================================================
 
 def validate_discount_limit(doc, method=None):
     """
@@ -34,9 +47,9 @@ def validate_discount_limit(doc, method=None):
         No Item Price query when validation is not required.
     """
 
-    # ============================================================
+    # =============================================================
     # 1. IGNORE POS
-    # ============================================================
+    # =============================================================
 
     if (
         doc.get("is_pos")
@@ -45,18 +58,20 @@ def validate_discount_limit(doc, method=None):
     ):
         return
 
-    # ============================================================
+    # =============================================================
     # 2. ONLY CUSTOM SELLING PRICE LISTS
-    # ============================================================
+    # =============================================================
 
-    selling_price_list = doc.get("selling_price_list")
+    selling_price_list = doc.get(
+        "selling_price_list"
+    )
 
     if selling_price_list not in TARGET_PRICE_LISTS:
         return
 
-    # ============================================================
-    # 3. COLLECT ITEMS AND CHECK IF VALIDATION IS NEEDED
-    # ============================================================
+    # =============================================================
+    # 3. COLLECT ITEMS
+    # =============================================================
 
     items = []
     needs_buying_prices = False
@@ -82,16 +97,20 @@ def validate_discount_limit(doc, method=None):
         ):
             needs_buying_prices = True
 
-    # No discount and no 999 code.
-    # Therefore no database query is required.
+    # =============================================================
+    # NO VALIDATION REQUIRED
+    # =============================================================
+
     if not needs_buying_prices:
         return
 
-    # ============================================================
+    # =============================================================
     # 4. ONE DATABASE QUERY
-    # ============================================================
+    # =============================================================
 
-    buying_prices = get_buying_prices_for_document(items)
+    buying_prices = get_buying_prices_for_document(
+        items
+    )
 
     minimum_margin = MINIMUM_MARGIN_PERCENT[
         selling_price_list
@@ -99,9 +118,9 @@ def validate_discount_limit(doc, method=None):
 
     problems = []
 
-    # ============================================================
+    # =============================================================
     # 5. VALIDATE EACH ITEM
-    # ============================================================
+    # =============================================================
 
     for row in items:
 
@@ -113,14 +132,19 @@ def validate_discount_limit(doc, method=None):
             row.get("custom_code")
         )
 
-        # No validation required for this row
+        # ---------------------------------------------------------
+        # Nothing to validate for this row
+        # ---------------------------------------------------------
+
         if (
             discount <= 0
             and custom_code != SPECIAL_ZERO_MARGIN_CODE
         ):
             continue
 
-        item_code = row.get("item_code") or ""
+        item_code = row.get(
+            "item_code"
+        ) or ""
 
         buying_rate = flt(
             buying_prices.get(
@@ -129,15 +153,20 @@ def validate_discount_limit(doc, method=None):
             )
         )
 
-        selling_rate = get_selling_rate(row)
+        selling_rate = get_selling_rate(
+            row
+        )
 
-        # ========================================================
+        # =========================================================
         # SPECIAL CODE 999
-        # ========================================================
+        # =========================================================
 
         if custom_code == SPECIAL_ZERO_MARGIN_CODE:
 
+            # -----------------------------------------------------
             # Buying price missing
+            # -----------------------------------------------------
+
             if buying_rate <= 0:
 
                 problems.append({
@@ -152,7 +181,10 @@ def validate_discount_limit(doc, method=None):
 
                 continue
 
+            # -----------------------------------------------------
             # Selling rate missing
+            # -----------------------------------------------------
+
             if selling_rate <= 0:
 
                 problems.append({
@@ -165,7 +197,10 @@ def validate_discount_limit(doc, method=None):
 
                 continue
 
+            # -----------------------------------------------------
             # Selling below Standard Buying
+            # -----------------------------------------------------
+
             if selling_rate < buying_rate:
 
                 problems.append({
@@ -180,9 +215,9 @@ def validate_discount_limit(doc, method=None):
 
                 continue
 
-            # ----------------------------------------------------
+            # -----------------------------------------------------
             # Recalculate actual discount
-            # ----------------------------------------------------
+            # -----------------------------------------------------
 
             price_list_rate = flt(
                 row.get("price_list_rate")
@@ -198,19 +233,25 @@ def validate_discount_limit(doc, method=None):
                     / price_list_rate
                 ) * 100
 
-                row.discount_percentage = actual_discount
+                row.discount_percentage = (
+                    actual_discount
+                )
+
                 row.rate = buying_rate
 
             continue
 
-        # ========================================================
+        # =========================================================
         # NORMAL DISCOUNT
-        # ========================================================
+        # =========================================================
 
         if discount <= 0:
             continue
 
+        # ---------------------------------------------------------
         # Selling rate missing
+        # ---------------------------------------------------------
+
         if selling_rate <= 0:
 
             problems.append({
@@ -223,7 +264,10 @@ def validate_discount_limit(doc, method=None):
 
             continue
 
+        # ---------------------------------------------------------
         # Buying price missing
+        # ---------------------------------------------------------
+
         if buying_rate <= 0:
 
             problems.append({
@@ -238,9 +282,9 @@ def validate_discount_limit(doc, method=None):
 
             continue
 
-        # --------------------------------------------------------
+        # ---------------------------------------------------------
         # Price List Rate
-        # --------------------------------------------------------
+        # ---------------------------------------------------------
 
         price_list_rate = flt(
             row.get("price_list_rate")
@@ -258,18 +302,21 @@ def validate_discount_limit(doc, method=None):
 
             continue
 
-        # --------------------------------------------------------
+        # ---------------------------------------------------------
         # Minimum selling rate
-        # --------------------------------------------------------
+        # ---------------------------------------------------------
 
         minimum_selling_rate = (
             buying_rate
-            * (1 + minimum_margin / 100)
+            * (
+                1
+                + minimum_margin / 100
+            )
         )
 
-        # --------------------------------------------------------
+        # ---------------------------------------------------------
         # Maximum allowed discount
-        # --------------------------------------------------------
+        # ---------------------------------------------------------
 
         maximum_discount = (
             (
@@ -284,9 +331,9 @@ def validate_discount_limit(doc, method=None):
             maximum_discount
         )
 
-        # --------------------------------------------------------
+        # ---------------------------------------------------------
         # Check discount
-        # --------------------------------------------------------
+        # ---------------------------------------------------------
 
         if discount > maximum_discount + 0.0001:
 
@@ -301,16 +348,16 @@ def validate_discount_limit(doc, method=None):
                 ),
             })
 
-    # ============================================================
-    # 6. EVERYTHING IS VALID
-    # ============================================================
+    # =============================================================
+    # 6. EVERYTHING VALID
+    # =============================================================
 
     if not problems:
         return
 
-    # ============================================================
+    # =============================================================
     # 7. SHOW ONLY PROBLEMATIC ITEMS
-    # ============================================================
+    # =============================================================
 
     message = build_error_table(
         problems,
@@ -408,7 +455,7 @@ def get_selling_rate(row):
 
 
 # =================================================================
-# ERROR TABLE
+# ERROR UI
 # =================================================================
 
 def build_error_table(
@@ -416,6 +463,16 @@ def build_error_table(
     selling_price_list,
     minimum_margin,
 ):
+    """
+    Compact ERPNext-style validation UI.
+
+    Buying Rate is intentionally NOT displayed.
+    It is still used internally for validation.
+    """
+
+    price_list = frappe.utils.escape_html(
+        str(selling_price_list)
+    )
 
     rows = []
 
@@ -429,51 +486,53 @@ def build_error_table(
             str(problem["reason"])
         )
 
+        selling_rate = (
+            f'{problem["selling_rate"]:.2f}'
+        )
+
+        discount = (
+            f'{problem["discount"]:.2f}%'
+        )
+
         rows.append(
             f"""
             <tr>
 
                 <td style="
-                    padding:10px 12px;
-                    border:1px solid #d1d8dd;
-                    font-weight:600;
+                    padding:8px 10px;
+                    border-bottom:1px solid #e5e7eb;
+                    text-align:left;
+                    font-weight:500;
                     white-space:nowrap;
                 ">
                     {item_code}
                 </td>
 
                 <td style="
-                    padding:10px 12px;
-                    border:1px solid #d1d8dd;
+                    padding:8px 10px;
+                    border-bottom:1px solid #e5e7eb;
                     text-align:right;
                     white-space:nowrap;
                 ">
-                    {problem["buying_rate"]:.2f}
+                    {selling_rate}
                 </td>
 
                 <td style="
-                    padding:10px 12px;
-                    border:1px solid #d1d8dd;
+                    padding:8px 10px;
+                    border-bottom:1px solid #e5e7eb;
                     text-align:right;
                     white-space:nowrap;
                 ">
-                    {problem["selling_rate"]:.2f}
+                    {discount}
                 </td>
 
                 <td style="
-                    padding:10px 12px;
-                    border:1px solid #d1d8dd;
-                    text-align:right;
-                    white-space:nowrap;
-                ">
-                    {problem["discount"]:.2f}%
-                </td>
-
-                <td style="
-                    padding:10px 12px;
-                    border:1px solid #d1d8dd;
+                    padding:8px 10px;
+                    border-bottom:1px solid #e5e7eb;
                     text-align:left;
-                    width:100%;
+                    color:#6b7280;
+                    line-height:1.4;
+                    min-width:190px;
                 ">
                     {reason}
                 </td>
@@ -482,30 +541,125 @@ def build_error_table(
             """
         )
 
-    price_list = frappe.utils.escape_html(
-        str(selling_price_list)
-    )
-
     table_rows = "".join(rows)
 
     return f"""
-    <div style="font-family: inherit;">
-        <p style="margin-bottom: 12px; font-weight: 500;">
-            Margin validation failed for <b>{price_list}</b> (Minimum required margin: <b>{minimum_margin}%</b>):
-        </p>
-        <table style="width:100%; border-collapse:collapse; font-size:12px;">
-            <thead>
-                <tr style="background-color: #f7f9fa;">
-                    <th style="padding:10px 12px; border:1px solid #d1d8dd; text-align:left;">Item Code</th>
-                    <th style="padding:10px 12px; border:1px solid #d1d8dd; text-align:right;">Buying Rate</th>
-                    <th style="padding:10px 12px; border:1px solid #d1d8dd; text-align:right;">Selling Rate</th>
-                    <th style="padding:10px 12px; border:1px solid #d1d8dd; text-align:right;">Discount</th>
-                    <th style="padding:10px 12px; border:1px solid #d1d8dd; text-align:left;">Reason</th>
-                </tr>
-            </thead>
-            <tbody>
-                {table_rows}
-            </tbody>
-        </table>
+    <div style="
+        font-family:inherit;
+        width:100%;
+        box-sizing:border-box;
+    ">
+
+        <div style="
+            margin-bottom:12px;
+            line-height:1.45;
+        ">
+
+            <div style="
+                font-size:14px;
+                font-weight:600;
+                color:#36414c;
+                margin-bottom:4px;
+            ">
+                Margin validation failed
+            </div>
+
+            <div style="
+                font-size:13px;
+                color:#6b7280;
+            ">
+                Price List:
+                <b style="color:#36414c;">
+                    {price_list}
+                </b>
+
+                <span style="margin:0 4px;">
+                    ·
+                </span>
+
+                Minimum margin:
+                <b style="color:#36414c;">
+                    {minimum_margin:.0f}%
+                </b>
+            </div>
+
+        </div>
+
+        <div style="
+            width:100%;
+            overflow-x:auto;
+            -webkit-overflow-scrolling:touch;
+            border:1px solid #d1d8dd;
+            border-radius:6px;
+            background:#ffffff;
+        ">
+
+            <table style="
+                width:100%;
+                min-width:560px;
+                border-collapse:collapse;
+                table-layout:auto;
+                font-size:12px;
+                color:#36414c;
+            ">
+
+                <thead>
+
+                    <tr style="
+                        background:#f7f9fa;
+                    ">
+
+                        <th style="
+                            padding:8px 10px;
+                            border-bottom:1px solid #d1d8dd;
+                            text-align:left;
+                            font-weight:600;
+                            white-space:nowrap;
+                        ">
+                            Item
+                        </th>
+
+                        <th style="
+                            padding:8px 10px;
+                            border-bottom:1px solid #d1d8dd;
+                            text-align:right;
+                            font-weight:600;
+                            white-space:nowrap;
+                        ">
+                            Selling Rate
+                        </th>
+
+                        <th style="
+                            padding:8px 10px;
+                            border-bottom:1px solid #d1d8dd;
+                            text-align:right;
+                            font-weight:600;
+                            white-space:nowrap;
+                        ">
+                            Discount
+                        </th>
+
+                        <th style="
+                            padding:8px 10px;
+                            border-bottom:1px solid #d1d8dd;
+                            text-align:left;
+                            font-weight:600;
+                            white-space:nowrap;
+                        ">
+                            Reason
+                        </th>
+
+                    </tr>
+
+                </thead>
+
+                <tbody>
+                    {table_rows}
+                </tbody>
+
+            </table>
+
+        </div>
+
     </div>
     """
