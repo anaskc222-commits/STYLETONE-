@@ -2,6 +2,13 @@ import json
 
 import frappe
 
+from my_custom_app.expiry_discount.weekly_expiry import (
+    build_weekly_snapshot,
+)
+
+
+WAREHOUSE = "Arakkinar Store - ST"
+
 
 def execute(filters=None):
 
@@ -9,38 +16,29 @@ def execute(filters=None):
 
     snapshot = get_snapshot(filters)
 
-    columns = get_columns()
-
     if not snapshot:
-        return columns, []
+        return get_columns(), []
 
-    return columns, snapshot.get("rows", [])
+    return (
+        get_columns(),
+        snapshot.get("rows", []),
+    )
 
 
 def get_snapshot(filters):
 
     cache = frappe.cache()
 
-    # ---------------------------------------------------------
-    # Explicit date
-    # ---------------------------------------------------------
-
     if filters.get("as_of_date"):
 
-        warehouse = (
-            filters.get("warehouse")
-            or "Arakkinar Store - ST"
+        as_of_date = filters.get(
+            "as_of_date"
         )
 
         key = (
-            f"weekly_expiry:"
-            f"{warehouse}:"
-            f"{filters.as_of_date}"
+            "weekly_expiry:"
+            f"{as_of_date}"
         )
-
-    # ---------------------------------------------------------
-    # Latest
-    # ---------------------------------------------------------
 
     else:
 
@@ -132,29 +130,37 @@ def get_columns():
         },
 
         {
-            "fieldname": "minimum_safe_selling_price",
-            "label": "Minimum Safe Selling Price",
+            "fieldname":
+                "minimum_safe_selling_price",
+            "label":
+                "Minimum Safe Selling Price",
             "fieldtype": "Currency",
             "width": 165,
         },
 
         {
-            "fieldname": "maximum_safe_discount",
-            "label": "Maximum Safe Discount",
+            "fieldname":
+                "maximum_safe_discount",
+            "label":
+                "Maximum Safe Discount",
             "fieldtype": "Percent",
             "width": 150,
         },
 
         {
-            "fieldname": "recommended_discount",
-            "label": "Recommended Discount",
+            "fieldname":
+                "recommended_discount",
+            "label":
+                "Recommended Discount",
             "fieldtype": "Percent",
             "width": 160,
         },
 
         {
-            "fieldname": "recommended_selling_price",
-            "label": "Recommended Selling Price",
+            "fieldname":
+                "recommended_selling_price",
+            "label":
+                "Recommended Selling Price",
             "fieldtype": "Currency",
             "width": 175,
         },
@@ -165,5 +171,4 @@ def get_columns():
             "fieldtype": "Data",
             "width": 150,
         },
-
     ]
