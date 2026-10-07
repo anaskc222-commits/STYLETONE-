@@ -11,27 +11,15 @@ WAREHOUSE = "Arakkinar Store - ST"
 SALES_MONTHS = 3
 EXPIRY_MONTHS = 10
 
-
-def enqueue_weekly_expiry():
-    """
-    Runs every Sunday at 01:00 AM.
-
-    Only queues the heavy calculation.
-    """
-
-    frappe.enqueue(
-        build_weekly_snapshot,
-        queue="long",
-        timeout=60 * 60 * 2,
-        job_name="styletone-weekly-expiry",
-    )
+LATEST_KEY = "weekly_expiry:latest"
 
 
 def build_weekly_snapshot():
     """
-    Builds the weekly expiry snapshot.
+    Build the expiry snapshot.
 
-    Heavy calculation happens only once per week.
+    Heavy calculation runs once when called by the scheduler
+    or manually from the report refresh action.
     """
 
     as_of_date = getdate()
@@ -39,10 +27,7 @@ def build_weekly_snapshot():
     batches = get_batches(as_of_date)
 
     if not batches:
-        save_snapshot(
-            as_of_date,
-            []
-        )
+        save_snapshot(as_of_date, [])
         return
 
     item_codes = sorted(
@@ -53,21 +38,11 @@ def build_weekly_snapshot():
         }
     )
 
-    # ---------------------------------------------------------
-    # BATCH QUANTITY
-    # One native ERPNext call per ITEM, not per batch
-    # ---------------------------------------------------------
-
     batch_qty = get_batch_quantities(
         item_codes,
         WAREHOUSE,
         as_of_date,
     )
-
-    # ---------------------------------------------------------
-    # SALES
-    # One SQL query
-    # ---------------------------------------------------------
 
     sales = get_sales(
         item_codes,
@@ -75,16 +50,7 @@ def build_weekly_snapshot():
         as_of_date,
     )
 
-    # ---------------------------------------------------------
-    # PRICES
-    # One SQL query
-    # ---------------------------------------------------------
-
     prices = get_prices(item_codes)
-
-    # ---------------------------------------------------------
-    # CALCULATE
-    # ---------------------------------------------------------
 
     result = []
 
@@ -93,7 +59,7 @@ def build_weekly_snapshot():
         item_code = batch.item_code
         batch_no = batch.batch_no
 
-        qty = batch_qty.get(
+        quantity = batch_qty.get(
             (item_code, batch_no),
             0,
         )
@@ -108,20 +74,13 @@ def build_weekly_snapshot():
             {},
         )
 
-        mrp = price.get(
-            "mrp",
-            0,
-        )
-
-        buying_cost = price.get(
-            "buying_cost",
-            0,
-        )
+        mrp = price.get("mrp", 0)
+        buying_cost = price.get("buying_cost", 0)
 
         calculation = calculate(
             as_of_date=as_of_date,
             expiry_date=batch.expiry_date,
-            quantity=qty,
+            quantity=quantity,
             mrp=mrp,
             buying_cost=buying_cost,
             sales_3m=sales_3m,
@@ -139,13 +98,15 @@ def build_weekly_snapshot():
                     "expiry_remaining"
                 ],
 
-                "quantity_available": qty,
+                "quantity_available": quantity,
 
                 "mrp": mrp,
                 "buying_cost": buying_cost,
 
                 "sales_3m": sales_3m,
-                "avg_monthly_sales": sales_3m / SALES_MONTHS,
+                "avg_monthly_sales": (
+                    sales_3m / SALES_MONTHS
+                ),
 
                 "movement": calculation["movement"],
 
@@ -199,9 +160,18 @@ def build_weekly_snapshot():
     )
 
 
-# ============================================================
-# BATCHES
-# ============================================================
+def enqueue_weekly_expiry():
+    """
+    Scheduler entry point.
+    """
+
+    frappe.enqueue(
+        build_weekly_snapshot,
+        queue="long",
+        timeout=60 * 60 * 2,
+        job_name="styletone-weekly-expiry",
+    )
+
 
 def get_batches(as_of_date):
 
@@ -210,7 +180,7 @@ def get_batches(as_of_date):
         EXPIRY_MONTHS,
     )
 
-    rows = frappe.db.sql(
+    return frappe.db.sql(
         """
         SELECT
             b.name AS batch_no,
@@ -225,9 +195,7 @@ def get_batches(as_of_date):
 
         WHERE
             b.expiry_date IS NOT NULL
-
             AND b.expiry_date >= %(as_of_date)s
-
             AND b.expiry_date <= %(end_date)s
 
         ORDER BY
@@ -242,12 +210,6 @@ def get_batches(as_of_date):
         as_dict=True,
     )
 
-    return rows
-
-
-# ============================================================
-# NATIVE ERPNext BATCH QTY
-# ============================================================
 
 def get_batch_quantities(
     item_codes,
@@ -287,10 +249,6 @@ def get_batch_quantities(
     return result
 
 
-# ============================================================
-# SALES
-# ============================================================
-
 def get_sales(
     item_codes,
     warehouse,
@@ -325,13 +283,9 @@ def get_sales(
 
         WHERE
             si.docstatus = 1
-
             AND si.posting_date >= %(start_date)s
-
             AND si.posting_date <= %(as_of_date)s
-
             AND sii.warehouse = %(warehouse)s
-
             AND sii.item_code IN %(items)s
 
         GROUP BY
@@ -353,10 +307,6 @@ def get_sales(
         for row in rows
     }
 
-
-# ============================================================
-# PRICES
-# ============================================================
 
 def get_prices(item_codes):
 
@@ -419,10 +369,6 @@ def get_prices(item_codes):
     }
 
 
-# ============================================================
-# CALCULATION
-# ============================================================
-
 def calculate(
     as_of_date,
     expiry_date,
@@ -443,9 +389,9 @@ def calculate(
         days_left
     )
 
-    # --------------------------------------------------------
+    # -------------------------
     # EXPIRY RISK
-    # --------------------------------------------------------
+    # -------------------------
 
     if months_left < 1:
         expiry_risk = 95
@@ -468,9 +414,9 @@ def calculate(
     else:
         expiry_risk = 0
 
-    # --------------------------------------------------------
-    # TARGET MARGIN
-    # --------------------------------------------------------
+    # -------------------------
+    # EXPIRY TARGET MARGIN
+    # -------------------------
 
     if months_left >= 10:
         expiry_target_margin = 45
@@ -490,9 +436,9 @@ def calculate(
     else:
         expiry_target_margin = 0
 
-    # --------------------------------------------------------
+    # -------------------------
     # MOVEMENT
-    # --------------------------------------------------------
+    # -------------------------
 
     avg_monthly_sales = (
         sales_3m / SALES_MONTHS
@@ -535,18 +481,18 @@ def calculate(
         movement = "NORMAL"
         movement_risk = 10
 
-    # --------------------------------------------------------
-    # RISK
-    # --------------------------------------------------------
+    # -------------------------
+    # COMBINED RISK
+    # -------------------------
 
     risk_score = (
         expiry_risk * 0.50
         + movement_risk * 0.50
     )
 
-    # --------------------------------------------------------
+    # -------------------------
     # TARGET MARGIN
-    # --------------------------------------------------------
+    # -------------------------
 
     target_margin = max(
         expiry_target_margin
@@ -554,9 +500,9 @@ def calculate(
         0,
     )
 
-    # --------------------------------------------------------
-    # SAFE PRICE
-    # --------------------------------------------------------
+    # -------------------------
+    # MINIMUM SAFE PRICE
+    # -------------------------
 
     if (
         buying_cost > 0
@@ -575,9 +521,9 @@ def calculate(
 
         minimum_safe_price = 0
 
-    # --------------------------------------------------------
-    # MAX SAFE DISCOUNT
-    # --------------------------------------------------------
+    # -------------------------
+    # MAXIMUM SAFE DISCOUNT
+    # -------------------------
 
     if (
         mrp > 0
@@ -604,9 +550,9 @@ def calculate(
 
         maximum_safe_discount = 0
 
-    # --------------------------------------------------------
+    # -------------------------
     # RECOMMENDED DISCOUNT
-    # --------------------------------------------------------
+    # -------------------------
 
     if (
         mrp > 0
@@ -625,30 +571,36 @@ def calculate(
 
         recommended_discount = 0
 
-    # --------------------------------------------------------
+    # -------------------------
     # SELLING PRICE
-    # --------------------------------------------------------
+    # -------------------------
 
-    recommended_selling_price = (
-        mrp
-        * (
-            1
-            - recommended_discount / 100
+    if mrp > 0:
+
+        recommended_selling_price = (
+            mrp
+            * (
+                1
+                - recommended_discount / 100
+            )
         )
-    ) if mrp > 0 else 0
 
-    # --------------------------------------------------------
+    else:
+
+        recommended_selling_price = 0
+
+    # -------------------------
     # PROFIT
-    # --------------------------------------------------------
+    # -------------------------
 
     expected_profit = (
         recommended_selling_price
         - buying_cost
     )
 
-    # --------------------------------------------------------
+    # -------------------------
     # ACTION
-    # --------------------------------------------------------
+    # -------------------------
 
     if months_left < 1:
 
@@ -675,7 +627,8 @@ def calculate(
         "expiry_remaining": expiry_remaining,
 
         "expiry_risk": expiry_risk,
-        "expiry_target_margin": expiry_target_margin,
+        "expiry_target_margin":
+            expiry_target_margin,
 
         "movement": movement,
         "movement_risk": movement_risk,
@@ -703,10 +656,6 @@ def calculate(
     }
 
 
-# ============================================================
-# FORMAT
-# ============================================================
-
 def format_remaining(days):
 
     if days < 0:
@@ -721,12 +670,11 @@ def format_remaining(days):
     if remaining_days == 0:
         return f"{months} Months"
 
-    return f"{months} Months {remaining_days} Days"
+    return (
+        f"{months} Months "
+        f"{remaining_days} Days"
+    )
 
-
-# ============================================================
-# SNAPSHOT
-# ============================================================
 
 def save_snapshot(
     as_of_date,
@@ -741,11 +689,8 @@ def save_snapshot(
         "rows": rows,
     }
 
-    # Store in Frappe cache.
-    # The report can read this without database tables.
     key = (
-        f"weekly_expiry:"
-        f"{WAREHOUSE}:"
+        "weekly_expiry:"
         f"{as_of_date}"
     )
 
@@ -755,9 +700,8 @@ def save_snapshot(
         expires_in_sec=60 * 60 * 24 * 10,
     )
 
-    # Also keep latest snapshot pointer.
     frappe.cache().set_value(
-        "weekly_expiry:latest",
+        LATEST_KEY,
         key,
         expires_in_sec=60 * 60 * 24 * 10,
     )
