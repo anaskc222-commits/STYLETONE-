@@ -5,6 +5,15 @@ app_description = "STYLETONE custom Frappe application"
 app_email = "your-email@example.com"
 app_license = "MIT"
 
+scheduler_events = {
+    "cron": {
+        # Every Sunday at 01:00 AM
+        "0 1 * * 0": [
+            "my_custom_app.expiry_discount.weekly_expiry.schedule_weekly_expiry"
+        ]
+    }
+}
+
 
 doc_events = {
     "Item Price": {
