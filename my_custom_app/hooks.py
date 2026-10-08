@@ -5,6 +5,10 @@ app_description = "STYLETONE custom Frappe application"
 app_email = "your-email@example.com"
 app_license = "MIT"
 
+doctype_js = {
+    "Sales Invoice": "public/js/sales_invoice_batch.js",
+}
+
 
 doc_events = {
     "Item Price": {
