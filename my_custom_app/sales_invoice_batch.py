@@ -83,27 +83,20 @@ def get_available_batches(item_code, warehouse=None):
 @frappe.whitelist()
 def scan_barcode_with_variants(search_value, ctx=None):
     """
-    Resolve a barcode for normal Sales Invoice processing.
+    Resolve a barcode for Sales Invoice processing.
 
     Cases:
 
-    1. Barcode belongs directly to a Variant
-       -> return that Variant.
-
-    2. Barcode belongs to an Item Template
-       -> return the Template and its available Variants.
-
-    3. Barcode does not exist
-       -> return empty result.
-
-    POS Next is not involved.
+    1. Barcode belongs directly to a Variant.
+    2. Barcode belongs to an Item Template.
+    3. Barcode does not exist.
     """
 
     if not search_value:
         return {}
 
     # ----------------------------------------------------------
-    # NORMAL ERPNext BARCODE LOOKUP
+    # BARCODE LOOKUP
     # ----------------------------------------------------------
 
     barcode_data = frappe.db.get_value(
@@ -150,8 +143,7 @@ def scan_barcode_with_variants(search_value, ctx=None):
         return {}
 
     # ----------------------------------------------------------
-    # CASE 1
-    # BARCODE BELONGS TO AN ACTUAL VARIANT
+    # VARIANT BARCODE
     # ----------------------------------------------------------
 
     if item.variant_of:
@@ -163,12 +155,12 @@ def scan_barcode_with_variants(search_value, ctx=None):
             "has_batch_no": item.has_batch_no,
             "has_serial_no": item.has_serial_no,
             "is_variant": 1,
+            "has_variants": 0,
             "variants": [],
         }
 
     # ----------------------------------------------------------
-    # CASE 2
-    # BARCODE BELONGS TO ITEM TEMPLATE
+    # NORMAL NON-VARIANT ITEM
     # ----------------------------------------------------------
 
     if not item.has_variants:
@@ -180,11 +172,12 @@ def scan_barcode_with_variants(search_value, ctx=None):
             "has_batch_no": item.has_batch_no,
             "has_serial_no": item.has_serial_no,
             "is_variant": 0,
+            "has_variants": 0,
             "variants": [],
         }
 
     # ----------------------------------------------------------
-    # FIND VARIANTS
+    # FIND ITEM VARIANTS
     # ----------------------------------------------------------
 
     variants = frappe.get_all(
@@ -229,52 +222,3 @@ def scan_barcode_with_variants(search_value, ctx=None):
         "has_variants": 1,
         "variants": result_variants,
     }
-
-What this now supports
-
-Different barcode for each variant:
-
-Scan barcode
-      ↓
-ERPNext identifies Variant
-      ↓
-Select Batch
-      ↓
-Batch No + Expiry Date
-
-Same/template barcode:
-
-Scan template barcode
-      ↓
-Select Variant
-      ↓
-Select Batch
-      ↓
-Batch No + Expiry Date
-
-Normal non-variant item:
-
-Scan barcode
-      ↓
-Item identified
-      ↓
-If batch-controlled → Select Batch
-
-The important point is that the two functions are now separate:
-
-- "get_available_batches()" → batch stock + expiry
-- "scan_barcode_with_variants()" → barcode + variant resolution
-
-The existing "get_available_batches()" logic is not replaced by the variant logic.
-
-After replacing the file, run:
-
-bench clear-cache
-bench clear-website-cache
-bench restart
-
-Then reload the browser with Ctrl + Shift + R.
-
-One important limitation: this Python method assumes the shared/template barcode is actually stored against the Item Template in "Item Barcode". ERPNext's native barcode lookup itself maps an "Item Barcode" row's "parent" to the Item.
-
-If your barcode is instead stored somewhere else as a template-level/shared barcode, tell me where you store it, and the lookup needs to be changed accordingly.
