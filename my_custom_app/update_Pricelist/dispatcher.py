@@ -18,6 +18,10 @@ PRICE_TARGETS = [
 ]
 
 
+# ======================================================================
+# RULE SPECIFICITY
+# ======================================================================
+
 # Lower number = more specific.
 #
 # Existing rule priority logic is preserved:
@@ -27,6 +31,7 @@ PRICE_TARGETS = [
 # Priority is evaluated first.
 # Specificity is used when priorities are equal.
 # Creation time is the final tie-breaker.
+
 RULE_SPECIFICITY = {
     "Item Code": 1,
     "Brand": 2,
@@ -37,9 +42,9 @@ RULE_SPECIFICITY = {
 }
 
 
-# ----------------------------------------------------------------------
+# ======================================================================
 # ITEM PRICE EVENT
-# ----------------------------------------------------------------------
+# ======================================================================
 
 def on_item_price_change(doc, method=None):
     """
@@ -110,9 +115,9 @@ def enqueue_b2b_price_job(item_price_name):
     )
 
 
-# ----------------------------------------------------------------------
+# ======================================================================
 # PURCHASE INVOICE EVENT
-# ----------------------------------------------------------------------
+# ======================================================================
 
 def on_purchase_invoice_submit(doc, method=None):
     """
@@ -208,9 +213,9 @@ def process_purchase_invoice_background(purchase_invoice_name):
         enqueue_b2b_price_job(item_price_name)
 
 
-# ----------------------------------------------------------------------
+# ======================================================================
 # MAIN BACKGROUND PROCESSOR
-# ----------------------------------------------------------------------
+# ======================================================================
 
 def process_b2b_price_background(item_price_name):
     """
@@ -224,6 +229,23 @@ def process_b2b_price_background(item_price_name):
         +--> SALOON
         |
         +--> BEAUTY PARLOUR
+
+    IMPORTANT:
+    Pricing Rule percentage is treated as TRUE MARGIN.
+
+    Example:
+
+        Buying Rate = 420
+        Margin = 20%
+
+        Selling Rate =
+            420 / (1 - 0.20)
+
+        Selling Rate = 525
+
+        Profit = 525 - 420 = 105
+
+        Margin = 105 / 525 = 20%
     """
 
     if not frappe.db.exists(
@@ -314,7 +336,10 @@ def process_b2b_price_background(item_price_name):
         margin_type = winning_rule.margin_type
         margin_value = winning_rule.margin_rate_or_amount
 
-        # Current implementation supports percentage margins.
+        # ----------------------------------------------------------
+        # ONLY PERCENTAGE MARGIN IS SUPPORTED
+        # ----------------------------------------------------------
+
         if margin_type != "Percentage":
             continue
 
@@ -325,16 +350,82 @@ def process_b2b_price_background(item_price_name):
         except (TypeError, ValueError):
             continue
 
+        # ----------------------------------------------------------
+        # VALIDATE MARGIN
+        # ----------------------------------------------------------
+
+        # Margin must be below 100%.
+        #
+        # 100% margin is mathematically impossible with a finite
+        # selling price because:
+        #
+        # Selling Price = Cost / (1 - 1)
+        #
+        # which results in division by zero.
+
+        if margin_value < 0:
+            continue
+
+        if margin_value >= 100:
+            frappe.log_error(
+                title="Invalid Pricing Rule Margin",
+                message=(
+                    f"Pricing Rule: {winning_rule.name}\n"
+                    f"Item: {source.item_code}\n"
+                    f"Price List: {target_price_list}\n"
+                    f"Margin: {margin_value}%\n\n"
+                    "Margin must be below 100%."
+                ),
+            )
+            continue
+
+        # ----------------------------------------------------------
+        # BUYING RATE
+        # ----------------------------------------------------------
+
         buying_rate = float(
             source.price_list_rate
         )
 
-        target_rate = buying_rate * (
-            1 + (margin_value / 100)
+        if buying_rate <= 0:
+            continue
+
+        # ----------------------------------------------------------
+        # TRUE MARGIN CALCULATION
+        # ----------------------------------------------------------
+        #
+        # Margin = (Selling - Cost) / Selling
+        #
+        # Therefore:
+        #
+        # Selling = Cost / (1 - Margin)
+        #
+        # Example:
+        #
+        # Cost = 420
+        # Margin = 20%
+        #
+        # Selling = 420 / (1 - 0.20)
+        #         = 420 / 0.80
+        #         = 525
+        #
+        # Profit = 525 - 420
+        #        = 105
+        #
+        # Margin = 105 / 525
+        #        = 20%
+        #
+
+        target_rate = buying_rate / (
+            1 - (margin_value / 100)
         )
 
         if target_rate <= 0:
             continue
+
+        # ----------------------------------------------------------
+        # UPDATE TARGET PRICE
+        # ----------------------------------------------------------
 
         update_target_item_price(
             item_code=source.item_code,
@@ -346,9 +437,9 @@ def process_b2b_price_background(item_price_name):
         )
 
 
-# ----------------------------------------------------------------------
+# ======================================================================
 # LOAD PRICING RULES
-# ----------------------------------------------------------------------
+# ======================================================================
 
 def load_active_rules():
     """
@@ -366,6 +457,9 @@ def load_active_rules():
     target calculation.
 
     Pricing Rule field is 'disable' in this ERPNext version.
+
+    The percentage in margin_rate_or_amount is treated as
+    TRUE MARGIN, NOT MARKUP.
     """
 
     target_price_lists = [
@@ -404,9 +498,9 @@ def load_active_rules():
         for rule in rules
     ]
 
-    # --------------------------------------------------------------
+    # ==================================================================
     # ITEM CODE CONDITIONS
-    # --------------------------------------------------------------
+    # ==================================================================
 
     item_code_rows = frappe.get_all(
         "Pricing Rule Item Code",
@@ -433,9 +527,9 @@ def load_active_rules():
             set()
         ).add(row.item_code)
 
-    # --------------------------------------------------------------
+    # ==================================================================
     # ITEM GROUP CONDITIONS
-    # --------------------------------------------------------------
+    # ==================================================================
 
     item_group_rows = frappe.get_all(
         "Pricing Rule Item Group",
@@ -462,9 +556,9 @@ def load_active_rules():
             set()
         ).add(row.item_group)
 
-    # --------------------------------------------------------------
+    # ==================================================================
     # BRAND CONDITIONS
-    # --------------------------------------------------------------
+    # ==================================================================
 
     brand_rows = frappe.get_all(
         "Pricing Rule Brand",
@@ -491,9 +585,9 @@ def load_active_rules():
             set()
         ).add(row.brand)
 
-    # --------------------------------------------------------------
+    # ==================================================================
     # ATTACH CONDITIONS
-    # --------------------------------------------------------------
+    # ==================================================================
 
     for rule in rules:
 
@@ -515,9 +609,9 @@ def load_active_rules():
     return rules
 
 
-# ----------------------------------------------------------------------
+# ======================================================================
 # FIND WINNING RULE
-# ----------------------------------------------------------------------
+# ======================================================================
 
 def find_winning_rule(
     rules,
@@ -551,36 +645,36 @@ def find_winning_rule(
 
     for rule in rules:
 
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
         # PRICE LIST
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
 
         if rule.for_price_list != price_list:
             continue
 
         apply_on = rule.apply_on or ""
 
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
         # ITEM CODE
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
 
         if apply_on == "Item Code":
 
             if item_code not in rule.item_codes:
                 continue
 
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
         # BRAND
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
 
         elif apply_on == "Brand":
 
             if brand not in rule.brands:
                 continue
 
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
         # ITEM GROUP
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
 
         elif apply_on == "Item Group":
 
@@ -593,9 +687,9 @@ def find_winning_rule(
             ):
                 continue
 
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
         # TRANSACTION
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
 
         elif apply_on in (
             "Transaction",
@@ -612,9 +706,9 @@ def find_winning_rule(
     if not matched_rules:
         return None
 
-    # --------------------------------------------------------------
+    # ==================================================================
     # PRIORITY + SPECIFICITY + CREATION
-    # --------------------------------------------------------------
+    # ==================================================================
 
     def sort_key(rule):
 
@@ -642,9 +736,9 @@ def find_winning_rule(
     )
 
 
-# ----------------------------------------------------------------------
+# ======================================================================
 # CREATE / UPDATE TARGET ITEM PRICE
-# ----------------------------------------------------------------------
+# ======================================================================
 
 def update_target_item_price(
     item_code,
@@ -703,9 +797,9 @@ def update_target_item_price(
         target_name = price.name
         break
 
-    # --------------------------------------------------------------
+    # ==================================================================
     # UPDATE EXISTING ITEM PRICE
-    # --------------------------------------------------------------
+    # ==================================================================
 
     if target_name:
 
@@ -725,9 +819,9 @@ def update_target_item_price(
 
         return
 
-    # --------------------------------------------------------------
+    # ==================================================================
     # CREATE NEW ITEM PRICE
-    # --------------------------------------------------------------
+    # ==================================================================
 
     item_price = frappe.get_doc(
         {
