@@ -5,7 +5,6 @@ app_description = "STYLETONE custom Frappe application"
 app_email = "your-email@example.com"
 app_license = "MIT"
 
-
 }
 
 
