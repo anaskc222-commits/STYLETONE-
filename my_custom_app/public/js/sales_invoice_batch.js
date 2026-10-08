@@ -1,21 +1,22 @@
 // ================================================================
 // SALES INVOICE - MANUAL BATCH + VARIANT SELECTOR
-// ERPNext v16.37.0
+// ERPNext v16
 //
-// NORMAL DESK SALES INVOICE ONLY
+// DESK SALES INVOICE ONLY
 //
 // POS / POS NEXT:
 //     NOT MODIFIED
 //
+// USES ERPNext'S NORMAL ITEM PROCESSING
+//
 // FEATURES:
-//     1. Manual Item -> Batch popup
-//     2. Barcode -> normal ERPNext barcode resolution
-//     3. Template barcode -> Variant popup
-//     4. Variant -> Batch popup
+//     1. Barcode lookup
+//     2. Template barcode -> Variant popup
+//     3. Variant -> normal ERPNext item processing
+//     4. Batch-controlled item -> Batch popup
 //     5. Batch popup shows Batch No + Expiry Date
-//     6. Quantity is NOT displayed
-//     7. Only positive-stock batches
-//     8. No FEFO
+//     6. Positive-stock batches only
+//     7. No quantity column
 // ================================================================
 
 (function () {
@@ -29,11 +30,673 @@
         return;
     }
 
+
+    // ============================================================
+    // BATCH DIALOG
+    // ============================================================
+
+    function show_batch_dialog(frm, item) {
+
+        if (!frm || !item || !item.item_code) {
+            return;
+        }
+
+        // --------------------------------------------------------
+        // Warehouse
+        // --------------------------------------------------------
+
+        const warehouse =
+            item.warehouse ||
+            frm.doc.set_warehouse;
+
+        if (!warehouse) {
+            frappe.msgprint({
+                title: __("Warehouse Required"),
+                message: __(
+                    "Please select a source warehouse before selecting a batch."
+                ),
+                indicator: "orange"
+            });
+
+            return;
+        }
+
+        // --------------------------------------------------------
+        // Prevent duplicate calls
+        // --------------------------------------------------------
+
+        if (item.__styleTone_batch_loading) {
+            return;
+        }
+
+        item.__styleTone_batch_loading = true;
+
+        // --------------------------------------------------------
+        // Get available batches
+        // --------------------------------------------------------
+
+        frappe.call({
+            method:
+                "my_custom_app.sales_invoice_batch.get_available_batches",
+
+            args: {
+                item_code: item.item_code,
+                warehouse: warehouse
+            },
+
+            freeze: false,
+
+            callback: function (r) {
+
+                item.__styleTone_batch_loading = false;
+
+                const batches = r.message || [];
+
+                // ------------------------------------------------
+                // No stock
+                // ------------------------------------------------
+
+                if (!batches.length) {
+
+                    frappe.msgprint({
+                        title: __("No Available Batch"),
+                        message: __(
+                            "No positive-stock batch is available for {0} in warehouse {1}.",
+                            [
+                                item.item_code,
+                                warehouse
+                            ]
+                        ),
+                        indicator: "orange"
+                    });
+
+                    return;
+                }
+
+                // ------------------------------------------------
+                // Find current row
+                // ------------------------------------------------
+
+                const row =
+                    frm.doc.items.find(function (d) {
+                        return d.name === item.name;
+                    });
+
+                if (!row) {
+                    return;
+                }
+
+                // ------------------------------------------------
+                // Build simple HTML table
+                // ------------------------------------------------
+                //
+                // Using a simple table instead of ERPNext's Grid
+                // prevents accidental quantity editing.
+                // ------------------------------------------------
+
+                let html = `
+                    <div class="style-tone-batch-list">
+                        <table class="table table-bordered">
+                            <thead>
+                                <tr>
+                                    <th style="width:55px;"></th>
+                                    <th>${__("Batch No")}</th>
+                                    <th>${__("Expiry Date")}</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                `;
+
+                batches.forEach(function (batch, index) {
+
+                    html += `
+                        <tr
+                            class="style-tone-batch-row"
+                            data-batch="${frappe.utils.escape_html(batch.batch_no)}"
+                            style="cursor:pointer;"
+                        >
+                            <td class="text-center">
+                                <input
+                                    type="radio"
+                                    name="style-tone-batch"
+                                    value="${frappe.utils.escape_html(batch.batch_no)}"
+                                    ${index === 0 ? "" : ""}
+                                >
+                            </td>
+
+                            <td>
+                                ${frappe.utils.escape_html(batch.batch_no)}
+                            </td>
+
+                            <td>
+                                ${batch.expiry_date
+                                    ? frappe.datetime.str_to_user(
+                                        batch.expiry_date
+                                    )
+                                    : ""}
+                            </td>
+                        </tr>
+                    `;
+                });
+
+                html += `
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+
+                // ------------------------------------------------
+                // Dialog
+                // ------------------------------------------------
+
+                const dialog =
+                    new frappe.ui.Dialog({
+                        title: __("Select Batch"),
+
+                        fields: [
+                            {
+                                fieldtype: "HTML",
+                                fieldname: "batch_html"
+                            }
+                        ],
+
+                        primary_action_label:
+                            __("Select"),
+
+                        primary_action: function () {
+
+                            const selected =
+                                dialog.$wrapper
+                                    .find(
+                                        'input[name="style-tone-batch"]:checked'
+                                    )
+                                    .val();
+
+                            if (!selected) {
+
+                                frappe.show_alert({
+                                    message:
+                                        __("Please select a batch"),
+                                    indicator: "orange"
+                                });
+
+                                return;
+                            }
+
+                            // ------------------------------------
+                            // Set batch using ERPNext model
+                            // ------------------------------------
+
+                            frappe.model.set_value(
+                                row.doctype,
+                                row.name,
+                                "batch_no",
+                                selected
+                            );
+
+                            dialog.hide();
+
+                            frm.refresh_field("items");
+                        }
+                    });
+
+                dialog.fields_dict.batch_html.$wrapper.html(
+                    html
+                );
+
+                // ------------------------------------------------
+                // Row click selects radio
+                // ------------------------------------------------
+
+                dialog.$wrapper.on(
+                    "click",
+                    ".style-tone-batch-row",
+                    function () {
+
+                        const batch =
+                            $(this).attr("data-batch");
+
+                        dialog.$wrapper
+                            .find(
+                                'input[name="style-tone-batch"]'
+                            )
+                            .prop("checked", false);
+
+                        dialog.$wrapper
+                            .find(
+                                'input[name="style-tone-batch"][value="' +
+                                batch.replace(/"/g, '\\"') +
+                                '"]'
+                            )
+                            .prop("checked", true);
+
+                        dialog.$wrapper
+                            .find(".style-tone-batch-row")
+                            .css(
+                                "background-color",
+                                ""
+                            );
+
+                        $(this).css(
+                            "background-color",
+                            "var(--subtle-fg)"
+                        );
+                    }
+                );
+
+                dialog.show();
+            },
+
+            error: function () {
+
+                item.__styleTone_batch_loading = false;
+
+                frappe.msgprint({
+                    title: __("Batch Lookup Failed"),
+                    message: __(
+                        "Unable to retrieve available batches."
+                    ),
+                    indicator: "red"
+                });
+            }
+        });
+    }
+
+
+    // ============================================================
+    // CHECK WHETHER BATCH DIALOG IS REQUIRED
+    // ============================================================
+
+    function check_batch_required(frm, item) {
+
+        if (!frm || !item) {
+            return false;
+        }
+
+        // Only Sales Invoice
+        if (frm.doc.doctype !== "Sales Invoice") {
+            return false;
+        }
+
+        // Never modify POS
+        if (frm.doc.is_pos) {
+            return false;
+        }
+
+        // Only stock transactions
+        if (!frm.doc.update_stock) {
+            return false;
+        }
+
+        // Batch required
+        if (!item.has_batch_no) {
+            return false;
+        }
+
+        // Serial-only item
+        if (
+            item.has_serial_no &&
+            !item.has_batch_no
+        ) {
+            return false;
+        }
+
+        // Already selected
+        if (item.batch_no) {
+            return false;
+        }
+
+        return true;
+    }
+
+
+    // ============================================================
+    // VARIANT DIALOG
+    // ============================================================
+
+    function show_variant_dialog(
+        scanner,
+        barcode,
+        data,
+        variants,
+        resolve,
+        reject
+    ) {
+
+        const options =
+            variants.map(function (variant) {
+                return (
+                    variant.item_code +
+                    " - " +
+                    (variant.item_name || "")
+                );
+            });
+
+        const option_map = {};
+
+        variants.forEach(function (variant) {
+
+            option_map[
+                variant.item_code +
+                " - " +
+                (variant.item_name || "")
+            ] = variant.item_code;
+        });
+
+        const dialog =
+            new frappe.ui.Dialog({
+
+                title: __("Select Variant"),
+
+                fields: [
+                    {
+                        fieldtype: "Select",
+
+                        fieldname: "variant",
+
+                        label: __("Variant"),
+
+                        options: options.join("\n"),
+
+                        reqd: 1
+                    }
+                ],
+
+                primary_action_label:
+                    __("Select"),
+
+                primary_action: function (values) {
+
+                    const item_code =
+                        option_map[values.variant];
+
+                    if (!item_code) {
+                        return;
+                    }
+
+                    dialog.hide();
+
+                    // ------------------------------------------------
+                    // IMPORTANT:
+                    //
+                    // We now use the selected Variant with ERPNext's
+                    // normal item processing.
+                    // ------------------------------------------------
+
+                    const selected_data =
+                        Object.assign(
+                            {},
+                            data,
+                            {
+                                item_code: item_code,
+                                barcode: barcode
+                            }
+                        );
+
+                    // Remove custom-only properties
+                    delete selected_data.variants;
+                    delete selected_data.has_variants;
+                    delete selected_data.is_variant;
+
+                    // ------------------------------------------------
+                    // ERPNext normal processing
+                    // ------------------------------------------------
+
+                    scanner.update_table(
+                        selected_data
+                    )
+                        .then(function (row) {
+
+                            scanner.play_success_sound();
+
+                            resolve(row);
+
+                            // ------------------------------------------------
+                            // Batch popup after row creation
+                            // ------------------------------------------------
+
+                            setTimeout(function () {
+
+                                if (
+                                    row &&
+                                    row.item_code
+                                ) {
+
+                                    const frm =
+                                        scanner.frm;
+
+                                    if (
+                                        check_batch_required(
+                                            frm,
+                                            row
+                                        )
+                                    ) {
+
+                                        show_batch_dialog(
+                                            frm,
+                                            row
+                                        );
+                                    }
+                                }
+
+                            }, 200);
+
+                        })
+                        .catch(function () {
+
+                            scanner.play_fail_sound();
+
+                            reject();
+                        });
+                }
+            });
+
+        dialog.show();
+    }
+
+
+    // ============================================================
+    // BARCODE PROCESS
+    // ============================================================
+
+    function install_barcode_process_scan(scanner) {
+
+        if (
+            !scanner ||
+            scanner.__styleTone_variant_scan_patched
+        ) {
+            return;
+        }
+
+        const original_process_scan =
+            scanner.process_scan;
+
+        if (
+            typeof original_process_scan !== "function"
+        ) {
+            return;
+        }
+
+        scanner.process_scan =
+            function () {
+
+                const me = this;
+
+                return new Promise(
+                    function (resolve, reject) {
+
+                        const input =
+                            me.scan_barcode_field.value;
+
+                        me.scan_barcode_field.set_value("");
+
+                        if (!input) {
+                            resolve();
+                            return;
+                        }
+
+                        // ------------------------------------------------
+                        // Our custom lookup
+                        // ------------------------------------------------
+
+                        frappe.call({
+
+                            method:
+                                "my_custom_app.sales_invoice_batch.scan_barcode_with_variants",
+
+                            args: {
+                                search_value: input
+                            },
+
+                            freeze: false,
+
+                            callback: function (r) {
+
+                                const data =
+                                    r.message || {};
+
+                                // ------------------------------------------------
+                                // Barcode not found by our lookup
+                                //
+                                // Fall back to ERPNext's original processing.
+                                // ------------------------------------------------
+
+                                if (
+                                    !data ||
+                                    !data.item_code
+                                ) {
+
+                                    // Restore original ERPNext behavior
+                                    me.scan_barcode_field.set_value(
+                                        input
+                                    );
+
+                                    original_process_scan
+                                        .apply(me)
+                                        .then(resolve)
+                                        .catch(reject);
+
+                                    return;
+                                }
+
+                                // ------------------------------------------------
+                                // Template barcode
+                                // ------------------------------------------------
+
+                                const variants =
+                                    data.variants || [];
+
+                                if (
+                                    variants.length > 1
+                                ) {
+
+                                    show_variant_dialog(
+                                        me,
+                                        input,
+                                        data,
+                                        variants,
+                                        resolve,
+                                        reject
+                                    );
+
+                                    return;
+                                }
+
+                                // ------------------------------------------------
+                                // Template with exactly one Variant
+                                // ------------------------------------------------
+
+                                if (
+                                    variants.length === 1
+                                ) {
+
+                                    data.item_code =
+                                        variants[0].item_code;
+                                }
+
+                                // ------------------------------------------------
+                                // Normal / Variant barcode
+                                //
+                                // Remove custom fields.
+                                // ------------------------------------------------
+
+                                delete data.variants;
+                                delete data.has_variants;
+                                delete data.is_variant;
+
+                                // ------------------------------------------------
+                                // ERPNext item creation
+                                // ------------------------------------------------
+
+                                me.update_table(data)
+                                    .then(function (row) {
+
+                                        me.play_success_sound();
+
+                                        resolve(row);
+
+                                        // ------------------------------------------------
+                                        // Batch popup
+                                        // ------------------------------------------------
+
+                                        setTimeout(function () {
+
+                                            if (
+                                                row &&
+                                                check_batch_required(
+                                                    me.frm,
+                                                    row
+                                                )
+                                            ) {
+
+                                                show_batch_dialog(
+                                                    me.frm,
+                                                    row
+                                                );
+                                            }
+
+                                        }, 200);
+
+                                    })
+                                    .catch(function () {
+
+                                        me.play_fail_sound();
+
+                                        reject();
+                                    });
+                            },
+
+                            error: function () {
+
+                                // ------------------------------------------------
+                                // If custom method fails,
+                                // use ERPNext native scanner.
+                                // ------------------------------------------------
+
+                                me.scan_barcode_field.set_value(
+                                    input
+                                );
+
+                                original_process_scan
+                                    .apply(me)
+                                    .then(resolve)
+                                    .catch(reject);
+                            }
+                        });
+                    }
+                );
+            };
+
+        scanner.__styleTone_variant_scan_patched = true;
+    }
+
+
     // ============================================================
     // INSTALL
     // ============================================================
 
     function install() {
+
         if (
             !window.erpnext ||
             !erpnext.TransactionController
@@ -51,63 +714,63 @@
             return false;
         }
 
-        // --------------------------------------------------------
-        // PATCH TransactionController.setup
-        // --------------------------------------------------------
+
+        // ========================================================
+        // SETUP PATCH
+        // ========================================================
 
         if (
             !prototype.__styleTone_original_setup
         ) {
+
             prototype.__styleTone_original_setup =
                 prototype.setup;
 
-            prototype.setup = function () {
-                this.__styleTone_original_setup.apply(
-                    this,
-                    arguments
-                );
+            prototype.setup =
+                function () {
 
-                const frm = this.frm;
-
-                // Only Sales Invoice
-                if (
-                    !frm ||
-                    frm.doc.doctype !== "Sales Invoice"
-                ) {
-                    return;
-                }
-
-                // Never modify POS
-                if (frm.doc.is_pos) {
-                    return;
-                }
-
-                // ------------------------------------------------
-                // Use our barcode resolver.
-                //
-                // It internally calls ERPNext's normal
-                // scan_barcode() and adds variant information
-                // only when required.
-                // ------------------------------------------------
-
-                if (this.barcode_scanner) {
-                    this.barcode_scanner.scan_api =
-                        "my_custom_app.sales_invoice_batch.scan_barcode_with_variants";
-
-                    install_barcode_process_scan(
-                        this.barcode_scanner
+                    this.__styleTone_original_setup.apply(
+                        this,
+                        arguments
                     );
-                }
-            };
+
+                    const frm = this.frm;
+
+                    if (
+                        !frm ||
+                        frm.doc.doctype !==
+                            "Sales Invoice"
+                    ) {
+                        return;
+                    }
+
+                    // Never modify POS
+                    if (frm.doc.is_pos) {
+                        return;
+                    }
+
+                    // ------------------------------------------------
+                    // Barcode scanner
+                    // ------------------------------------------------
+
+                    if (this.barcode_scanner) {
+
+                        install_barcode_process_scan(
+                            this.barcode_scanner
+                        );
+                    }
+                };
         }
 
-        // --------------------------------------------------------
-        // PATCH batch-selection point
-        // --------------------------------------------------------
+
+        // ========================================================
+        // BATCH SELECTION PATCH
+        // ========================================================
 
         if (
             !prototype.__styleTone_original_batch_selector
         ) {
+
             const original =
                 prototype.show_batch_dialog_if_required;
 
@@ -122,8 +785,8 @@
 
             prototype.show_batch_dialog_if_required =
                 function (item) {
-                    const me = this;
-                    const frm = me.frm;
+
+                    const frm = this.frm;
 
                     // ------------------------------------------------
                     // Only Sales Invoice
@@ -131,8 +794,10 @@
 
                     if (
                         !frm ||
-                        frm.doc.doctype !== "Sales Invoice"
+                        frm.doc.doctype !==
+                            "Sales Invoice"
                     ) {
+
                         return original.apply(
                             this,
                             arguments
@@ -140,10 +805,11 @@
                     }
 
                     // ------------------------------------------------
-                    // Never touch POS
+                    // Never POS
                     // ------------------------------------------------
 
                     if (frm.doc.is_pos) {
+
                         return original.apply(
                             this,
                             arguments
@@ -151,719 +817,73 @@
                     }
 
                     // ------------------------------------------------
-                    // Basic checks
+                    // Our batch popup
                     // ------------------------------------------------
 
                     if (
-                        !item ||
-                        !item.item_code
+                        check_batch_required(
+                            frm,
+                            item
+                        )
                     ) {
-                        return original.apply(
-                            this,
-                            arguments
+
+                        show_batch_dialog(
+                            frm,
+                            item
                         );
-                    }
 
-                    // ------------------------------------------------
-                    // Only when stock is updated
-                    // ------------------------------------------------
-
-                    if (!frm.doc.update_stock) {
-                        return original.apply(
-                            this,
-                            arguments
-                        );
-                    }
-
-                    // ------------------------------------------------
-                    // Serial-only item
-                    // Leave ERPNext standard behavior
-                    // ------------------------------------------------
-
-                    if (
-                        item.has_serial_no &&
-                        !item.has_batch_no
-                    ) {
-                        return original.apply(
-                            this,
-                            arguments
-                        );
-                    }
-
-                    // ------------------------------------------------
-                    // Not batch controlled
-                    // ------------------------------------------------
-
-                    if (!item.has_batch_no) {
-                        return original.apply(
-                            this,
-                            arguments
-                        );
-                    }
-
-                    // ------------------------------------------------
-                    // Already selected
-                    // ------------------------------------------------
-
-                    if (item.batch_no) {
-                        return original.apply(
-                            this,
-                            arguments
-                        );
-                    }
-
-                    // ------------------------------------------------
-                    // Warehouse
-                    // ------------------------------------------------
-
-                    const warehouse =
-                        item.warehouse ||
-                        frm.doc.set_warehouse;
-
-                    if (!warehouse) {
-                        return original.apply(
-                            this,
-                            arguments
-                        );
-                    }
-
-                    // ------------------------------------------------
-                    // Prevent duplicate popup request
-                    // ------------------------------------------------
-
-                    if (
-                        item.__styleTone_batch_loading
-                    ) {
                         return;
                     }
 
-                    item.__styleTone_batch_loading =
-                        true;
-
                     // ------------------------------------------------
-                    // Get available batches
+                    // Everything else = ERPNext
                     // ------------------------------------------------
 
-                    frappe.call({
-                        method:
-                            "my_custom_app.sales_invoice_batch.get_available_batches",
-
-                        args: {
-                            item_code:
-                                item.item_code,
-
-                            warehouse:
-                                warehouse
-                        },
-
-                        freeze: false,
-
-                        callback: function (r) {
-                            item.__styleTone_batch_loading =
-                                false;
-
-                            const batches =
-                                r.message || [];
-
-                            // ------------------------------------------------
-                            // No available batches
-                            // ------------------------------------------------
-
-                            if (!batches.length) {
-                                frappe.flags.dialog_set =
-                                    false;
-
-                                return;
-                            }
-
-                            // ------------------------------------------------
-                            // Current row
-                            // ------------------------------------------------
-
-                            const row =
-                                frm.doc.items.find(
-                                    function (d) {
-                                        return (
-                                            d.name ===
-                                            item.name
-                                        );
-                                    }
-                                );
-
-                            if (!row) {
-                                return;
-                            }
-
-                            // ------------------------------------------------
-                            // Batch table
-                            // ------------------------------------------------
-
-                            const dialog =
-                                new frappe.ui.Dialog({
-                                    title:
-                                        __("Select Batch"),
-
-                                    fields: [
-                                        {
-                                            fieldtype:
-                                                "Table",
-
-                                            fieldname:
-                                                "batches",
-
-                                            label:
-                                                __("Available Batches"),
-
-                                            cannot_add_rows:
-                                                true,
-
-                                            cannot_delete_rows:
-                                                true,
-
-                                            in_place_edit:
-                                                false,
-
-                                            data:
-                                                batches.map(
-                                                    function (
-                                                        batch
-                                                    ) {
-                                                        return {
-                                                            batch_no:
-                                                                batch.batch_no,
-
-                                                            expiry_date:
-                                                                batch.expiry_date ||
-                                                                ""
-                                                        };
-                                                    }
-                                                ),
-
-                                            fields: [
-                                                {
-                                                    fieldtype:
-                                                        "Data",
-
-                                                    fieldname:
-                                                        "batch_no",
-
-                                                    label:
-                                                        __("Batch No"),
-
-                                                    in_list_view:
-                                                        1,
-
-                                                    read_only:
-                                                        1,
-
-                                                    columns:
-                                                        2
-                                                },
-
-                                                {
-                                                    fieldtype:
-                                                        "Date",
-
-                                                    fieldname:
-                                                        "expiry_date",
-
-                                                    label:
-                                                        __("Expiry Date"),
-
-                                                    in_list_view:
-                                                        1,
-
-                                                    read_only:
-                                                        1,
-
-                                                    columns:
-                                                        2
-                                                }
-                                            ]
-                                        }
-                                    ],
-
-                                    primary_action_label:
-                                        __("Select"),
-
-                                    primary_action:
-                                        function () {
-                                            const values =
-                                                dialog.get_values();
-
-                                            if (
-                                                !values ||
-                                                !values.batches ||
-                                                !values.batches.length
-                                            ) {
-                                                return;
-                                            }
-
-                                            // ------------------------------------------------
-                                            // First row is selected because the table
-                                            // is read-only and only displays choices.
-                                            //
-                                            // We replace this below with the selected
-                                            // row through the checkbox/selection logic.
-                                            // ------------------------------------------------
-                                        }
-                                });
-
-                            // ------------------------------------------------
-                            // Add row-selection behavior
-                            // ------------------------------------------------
-
-                            dialog.show();
-
-                            const grid =
-                                dialog.fields_dict
-                                    .batches
-                                    .grid;
-
-                            // Select one batch row
-                            grid.wrapper.on(
-                                "click",
-                                ".grid-row",
-                                function () {
-                                    grid.grid_rows.forEach(
-                                        function (
-                                            grid_row
-                                        ) {
-                                            grid_row
-                                                .row
-                                                .removeClass(
-                                                    "row-selected"
-                                                );
-                                        }
-                                    );
-
-                                    const row_name =
-                                        $(this)
-                                            .attr(
-                                                "data-name"
-                                            );
-
-                                    if (row_name) {
-                                        $(this)
-                                            .addClass(
-                                                "row-selected"
-                                            );
-
-                                        dialog.__selected_batch =
-                                            row_name;
-                                    }
-                                }
-                            );
-
-                            // ------------------------------------------------
-                            // Replace primary action
-                            // ------------------------------------------------
-
-                            dialog.set_primary_action(
-                                __("Select"),
-                                function () {
-                                    let selected =
-                                        null;
-
-                                    if (
-                                        dialog.__selected_batch
-                                    ) {
-                                        selected =
-                                            batches.find(
-                                                function (
-                                                    b
-                                                ) {
-                                                    return (
-                                                        b.batch_no ===
-                                                        dialog.__selected_batch
-                                                    );
-                                                }
-                                            );
-                                    }
-
-                                    // If only one batch,
-                                    // allow direct selection.
-                                    if (
-                                        !selected &&
-                                        batches.length ===
-                                            1
-                                    ) {
-                                        selected =
-                                            batches[0];
-                                    }
-
-                                    if (!selected) {
-                                        frappe.show_alert({
-                                            message:
-                                                __("Please select a batch"),
-
-                                            indicator:
-                                                "orange"
-                                        });
-
-                                        return;
-                                    }
-
-                                    // ------------------------------------------------
-                                    // Set selected batch
-                                    // ------------------------------------------------
-
-                                    frappe.model.set_value(
-                                        row.doctype,
-                                        row.name,
-                                        "batch_no",
-                                        selected.batch_no
-                                    );
-
-                                    dialog.hide();
-
-                                    frm.refresh_field(
-                                        "items"
-                                    );
-
-                                    frappe.flags.dialog_set =
-                                        false;
-                                }
-                            );
-                        },
-
-                        error: function () {
-                            item.__styleTone_batch_loading =
-                                false;
-
-                            frappe.flags.dialog_set =
-                                false;
-                        }
-                    });
-
-                    // ------------------------------------------------
-                    // We handle the batch popup ourselves.
-                    // ------------------------------------------------
-
-                    return;
+                    return original.apply(
+                        this,
+                        arguments
+                    );
                 };
         }
+
+
+        // ========================================================
+        // INSTALLED
+        // ========================================================
 
         window.__styleToneSalesInvoiceBatchFinal =
             true;
 
         console.log(
-            "STYLETONE: Sales Invoice batch/variant selector installed."
+            "Sales Invoice custom batch/variant selector installed."
         );
 
         return true;
     }
 
-    // ============================================================
-    // BARCODE PROCESS PATCH
-    // ============================================================
-
-    function install_barcode_process_scan(scanner) {
-        if (
-            !scanner ||
-            scanner.__styleTone_variant_scan_patched
-        ) {
-            return;
-        }
-
-        const original_process_scan =
-            scanner.process_scan;
-
-        scanner.process_scan =
-            function () {
-                const me = this;
-
-                return new Promise(
-                    function (
-                        resolve,
-                        reject
-                    ) {
-                        const input =
-                            me.scan_barcode_field.value;
-
-                        me.scan_barcode_field.set_value(
-                            ""
-                        );
-
-                        if (!input) {
-                            resolve();
-                            return;
-                        }
-
-                        me.scan_api_call(
-                            input,
-                            function (r) {
-                                const data =
-                                    r &&
-                                    r.message;
-
-                                // ------------------------------------------------
-                                // Normal ERPNext behavior
-                                // ------------------------------------------------
-
-                                if (
-                                    !data ||
-                                    Object.keys(data).length ===
-                                        0
-                                ) {
-                                    me.show_alert(
-                                        me.has_last_scanned_warehouse
-                                            ? __(
-                                                  "Cannot find Item or Warehouse with this Barcode"
-                                              )
-                                            : __(
-                                                  "Cannot find Item with this Barcode"
-                                              ),
-                                        "red"
-                                    );
-
-                                    me.clean_up();
-
-                                    me.play_fail_sound();
-
-                                    reject();
-
-                                    return;
-                                }
-
-                                // ------------------------------------------------
-                                // Warehouse scan
-                                // ------------------------------------------------
-
-                                if (data.warehouse) {
-                                    me.handle_warehouse_scan(
-                                        data
-                                    );
-
-                                    me.play_success_sound();
-
-                                    resolve();
-
-                                    return;
-                                }
-
-                                // =================================================
-                                // VARIANT SELECTION
-                                // =================================================
-
-                                const variants =
-                                    data.variant_selection ||
-                                    [];
-
-                                if (
-                                    variants.length >
-                                    1
-                                ) {
-                                    show_variant_dialog(
-                                        me,
-                                        data,
-                                        variants,
-                                        input,
-                                        resolve,
-                                        reject
-                                    );
-
-                                    return;
-                                }
-
-                                // ------------------------------------------------
-                                // One variant:
-                                // automatically use it.
-                                // No variant popup necessary.
-                                // ------------------------------------------------
-
-                                if (
-                                    variants.length ===
-                                    1
-                                ) {
-                                    data.item_code =
-                                        variants[0]
-                                            .item_code;
-
-                                    delete data.variant_selection;
-                                }
-
-                                // ------------------------------------------------
-                                // Normal ERPNext update
-                                // ------------------------------------------------
-
-                                delete data.variant_selection;
-
-                                me.update_table(
-                                    data
-                                )
-                                    .then(
-                                        function (
-                                            row
-                                        ) {
-                                            me.play_success_sound();
-
-                                            resolve(
-                                                row
-                                            );
-                                        }
-                                    )
-                                    .catch(
-                                        function () {
-                                            me.play_fail_sound();
-
-                                            reject();
-                                        }
-                                    );
-                            }
-                        );
-                    }
-                );
-            };
-
-        scanner.__styleTone_variant_scan_patched =
-            true;
-    }
 
     // ============================================================
-    // VARIANT POPUP
-    // ============================================================
-
-    function show_variant_dialog(
-        scanner,
-        data,
-        variants,
-        barcode,
-        resolve,
-        reject
-    ) {
-        const options =
-            variants.map(
-                function (variant) {
-                    return (
-                        variant.item_code +
-                        " - " +
-                        (variant.item_name || "")
-                    );
-                }
-            );
-
-        const option_map = {};
-
-        variants.forEach(
-            function (variant) {
-                option_map[
-                    variant.item_code +
-                        " - " +
-                        (variant.item_name || "")
-                ] =
-                    variant.item_code;
-            }
-        );
-
-        const dialog =
-            new frappe.ui.Dialog({
-                title:
-                    __("Select Variant"),
-
-                fields: [
-                    {
-                        fieldtype:
-                            "Select",
-
-                        fieldname:
-                            "variant",
-
-                        label:
-                            __("Variant"),
-
-                        options:
-                            options.join("\n"),
-
-                        reqd: 1
-                    }
-                ],
-
-                primary_action_label:
-                    __("Select"),
-
-                primary_action:
-                    function (
-                        values
-                    ) {
-                        const item_code =
-                            option_map[
-                                values.variant
-                            ];
-
-                        if (!item_code) {
-                            return;
-                        }
-
-                        dialog.hide();
-
-                        const new_data =
-                            Object.assign(
-                                {},
-                                data,
-                                {
-                                    item_code:
-                                        item_code,
-
-                                    barcode:
-                                        barcode
-                                }
-                            );
-
-                        delete new_data.variant_selection;
-
-                        scanner
-                            .update_table(
-                                new_data
-                            )
-                            .then(
-                                function (
-                                    row
-                                ) {
-                                    scanner.play_success_sound();
-
-                                    resolve(
-                                        row
-                                    );
-                                }
-                            )
-                            .catch(
-                                function () {
-                                    scanner.play_fail_sound();
-
-                                    reject();
-                                }
-                            );
-                    }
-            });
-
-        dialog.show();
-    }
-
-    // ============================================================
-    // START INSTALL
+    // START
     // ============================================================
 
     if (install()) {
         return;
     }
 
-    // Short startup retry only.
-    // This is NOT item polling.
     let attempts = 0;
 
     const timer =
-        setInterval(
-            function () {
-                attempts++;
+        setInterval(function () {
 
-                if (
-                    install() ||
-                    attempts >= 20
-                ) {
-                    clearInterval(timer);
-                }
-            },
-            250
-        );
+            attempts++;
+
+            if (
+                install() ||
+                attempts >= 20
+            ) {
+                clearInterval(timer);
+            }
+
+        }, 250);
+
 })();
