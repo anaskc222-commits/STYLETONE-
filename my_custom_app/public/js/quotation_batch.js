@@ -1,8 +1,21 @@
 
+/* STYLETONE - ERPNext v16 Quotation barcode / batch selector
+ *
+ * Standard scan_barcode field
+ * Barcode -> Variant popup if template
+ *         -> Batch popup if batch-tracked
+ *         -> Add item to Quotation
+ *
+ * Batch reference: Quotation Item.custom_batch_no
+ * Does not intentionally change Sales Invoice or POSNext behavior.
+ */
+
 (() => {
     "use strict";
 
     const API = "my_custom_app.quotation_batch";
+    const PATCH_FLAG = "__styleToneQuotationBarcodePatchV2";
+    const busyForms = new Set();
 
     function supported(frm) {
         return Boolean(
@@ -12,11 +25,23 @@
         );
     }
 
-    function escape(value) {
+    function esc(value) {
         return frappe.utils.escape_html(String(value ?? ""));
     }
 
-    function warehouse_for(frm) {
+    function show_error(error) {
+        frappe.msgprint({
+            title: "Quotation Barcode / Batch Error",
+            indicator: "red",
+            message: esc(
+                error?.message ||
+                error?.exc ||
+                "Barcode processing failed."
+            )
+        });
+    }
+
+    function get_warehouse(frm) {
         return (
             frm.doc.set_warehouse ||
             frappe.defaults.get_user_default("Warehouse") ||
@@ -28,165 +53,256 @@
         return frappe.call({
             method: `${API}.${method}`,
             args
-        }).then((r) => {
-            if (r.exc) {
+        }).then((response) => {
+            if (response.exc) {
                 throw new Error("The server could not complete the request.");
             }
-            return r.message;
+
+            if (response.message === undefined) {
+                throw new Error(`No result returned by ${method}.`);
+            }
+
+            return response.message;
         });
     }
 
-    function choose_from_table(title, rows, columns, label) {
+    function make_dialog(title, fieldname, html) {
+        const dialog = new frappe.ui.Dialog({
+            title,
+            size: "large",
+            fields: [
+                {
+                    fieldname,
+                    fieldtype: "HTML"
+                }
+            ]
+        });
+
+        dialog.fields_dict[fieldname].$wrapper.html(html);
+        return dialog;
+    }
+
+    function select_variant(variants) {
         return new Promise((resolve) => {
-            if (!rows || !rows.length) {
-                frappe.msgprint(`No ${label} available.`);
+            if (!Array.isArray(variants) || !variants.length) {
+                frappe.msgprint("No enabled variants are available.");
                 resolve(null);
                 return;
             }
 
             let finished = false;
 
-            const finish = (value) => {
+            function finish(value) {
                 if (finished) return;
                 finished = true;
                 resolve(value);
-            };
+            }
 
-            const htmlRows = rows.map((row, index) => {
-                const cells = columns.map((column) =>
-                    `<td>${escape(row[column.key] ?? column.empty ?? "")}</td>`
-                ).join("");
+            const rows = variants.map((variant, index) => `
+                <tr>
+                    <td>${index + 1}</td>
+                    <td><strong>${esc(variant.item_code)}</strong></td>
+                    <td>${esc(variant.item_name || "")}</td>
+                    <td>${variant.has_batch_no ? "Yes" : "No"}</td>
+                    <td>${esc(variant.stock_uom || "")}</td>
+                    <td>
+                        <button type="button"
+                            class="btn btn-primary btn-xs st-q-variant"
+                            data-index="${index}">
+                            Select
+                        </button>
+                    </td>
+                </tr>
+            `).join("");
 
-                return `
-                    <tr>
-                        ${cells}
-                        <td>
-                            <button type="button"
-                                class="btn btn-primary btn-xs st-choose"
-                                data-index="${index}">
-                                Select
-                            </button>
-                        </td>
-                    </tr>
-                `;
-            }).join("");
+            const dialog = make_dialog(
+                "Select Item Variant",
+                "variant_table",
+                `
+                    <div class="table-responsive">
+                        <table class="table table-bordered table-hover">
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>Item Code</th>
+                                    <th>Item Name</th>
+                                    <th>Batch Tracked</th>
+                                    <th>Stock UOM</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody>${rows}</tbody>
+                        </table>
+                    </div>
+                `
+            );
 
-            const headers = columns.map((column) =>
-                `<th>${escape(column.label)}</th>`
-            ).join("");
+            dialog.$wrapper.on(
+                "click.stQuotationVariant",
+                ".st-q-variant",
+                function () {
+                    const index = Number($(this).attr("data-index"));
+                    const selected = variants[index];
 
-            const dialog = new frappe.ui.Dialog({
-                title,
-                size: "large",
-                fields: [
-                    {
-                        fieldname: "selection",
-                        fieldtype: "HTML"
+                    if (!selected?.item_code) {
+                        frappe.msgprint("Please select a valid variant.");
+                        return;
                     }
-                ]
-            });
 
-            const html = `
-                <div class="table-responsive">
-                    <table class="table table-bordered table-hover">
-                        <thead>
-                            <tr>${headers}<th>Action</th></tr>
-                        </thead>
-                        <tbody>${htmlRows}</tbody>
-                    </table>
-                </div>
-            `;
+                    finish(selected);
+                    dialog.hide();
+                }
+            );
 
-            dialog.fields_dict.selection.$wrapper.html(html);
-
-            dialog.$wrapper.on("click.stQuotation", ".st-choose", function () {
-                const index = Number($(this).attr("data-index"));
-                finish(rows[index] || null);
-                dialog.hide();
-            });
-
-            dialog.$wrapper.on("hidden.bs.modal.stQuotation", () => {
-                finish(null);
-                dialog.$wrapper.off(".stQuotation");
-            });
+            dialog.$wrapper.on(
+                "hidden.bs.modal.stQuotationVariant",
+                () => {
+                    finish(null);
+                    dialog.$wrapper.off(".stQuotationVariant");
+                }
+            );
 
             dialog.show();
         });
     }
 
-    async function choose_variant(result) {
-        if (!result.has_variants) {
-            return result;
+    function select_batch(item_code, warehouse) {
+        return new Promise((resolve, reject) => {
+            let finished = false;
+
+            function finish(value) {
+                if (finished) return;
+                finished = true;
+                resolve(value);
+            }
+
+            call("get_available_batches", {
+                item_code,
+                warehouse
+            }).then((batches) => {
+                if (!Array.isArray(batches) || !batches.length) {
+                    reject(new Error(
+                        `No positive-quantity batches found for ` +
+                        `${item_code} in ${warehouse}.`
+                    ));
+                    return;
+                }
+
+                const rows = batches.map((batch, index) => `
+                    <tr>
+                        <td>${index + 1}</td>
+                        <td><strong>${esc(batch.name)}</strong></td>
+                        <td>${esc(batch.expiry_date || "Not set")}</td>
+                        <td>${esc(batch.available_qty ?? "")}</td>
+                        <td>
+                            <button type="button"
+                                class="btn btn-primary btn-xs st-q-batch"
+                                data-index="${index}">
+                                Select
+                            </button>
+                        </td>
+                    </tr>
+                `).join("");
+
+                const dialog = make_dialog(
+                    `Select Batch — ${item_code}`,
+                    "batch_table",
+                    `
+                        <div class="table-responsive">
+                            <table class="table table-bordered table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>#</th>
+                                        <th>Batch No.</th>
+                                        <th>Expiry Date</th>
+                                        <th>Available Qty</th>
+                                        <th>Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody>${rows}</tbody>
+                            </table>
+                        </div>
+                    `
+                );
+
+                dialog.$wrapper.on(
+                    "click.stQuotationBatch",
+                    ".st-q-batch",
+                    function () {
+                        const index = Number($(this).attr("data-index"));
+                        const selected = batches[index];
+
+                        if (!selected?.name) {
+                            frappe.msgprint("Please select a valid batch.");
+                            return;
+                        }
+
+                        finish(selected.name);
+                        dialog.hide();
+                    }
+                );
+
+                dialog.$wrapper.on(
+                    "hidden.bs.modal.stQuotationBatch",
+                    () => {
+                        finish(null);
+                        dialog.$wrapper.off(".stQuotationBatch");
+                    }
+                );
+
+                dialog.show();
+            }).catch(reject);
+        });
+    }
+
+    async function add_item(frm, item, warehouse, batch_no) {
+        const item_code = item.item_code || item.name;
+
+        if (!item_code) {
+            throw new Error("The selected item has no item code.");
         }
 
-        const selected = await choose_from_table(
-            "Select Item Variant",
-            result.variants,
-            [
-                { key: "item_code", label: "Item Code" },
-                { key: "item_name", label: "Item Name" },
-                { key: "has_batch_no", label: "Batch Tracked" },
-                { key: "stock_uom", label: "Stock UOM" }
-            ],
-            "variants"
-        );
-
-        return selected;
-    }
-
-    async function choose_batch(item_code, warehouse) {
-        const batches = await call("get_available_batches", {
-            item_code,
-            warehouse
-        });
-
-        const selected = await choose_from_table(
-            `Select Batch — ${item_code} (${warehouse})`,
-            batches,
-            [
-                { key: "name", label: "Batch No." },
-                { key: "expiry_date", label: "Expiry Date", empty: "Not set" },
-                { key: "available_qty", label: "Ledger Qty" }
-            ],
-            "available batches"
-        );
-
-        return selected?.name || null;
-    }
-
-    async function add_item(frm, item_code, warehouse, batch_no) {
-        const item_result = await frappe.db.get_value(
-            "Item",
-            item_code,
-            [
-                "disabled",
-                "has_batch_no",
-                "has_variants",
-                "variant_of"
-            ]
-        );
-
-        const item = item_result?.message;
-
-        if (!item || item.disabled) {
-            throw new Error(`Item ${item_code} is missing or disabled.`);
+        if (item.disabled) {
+            throw new Error(`Item ${item_code} is disabled.`);
         }
 
         if (item.has_variants && !item.variant_of) {
-            throw new Error("An item template cannot be added directly.");
+            throw new Error(
+                `Select a concrete variant for ${item_code}.`
+            );
+        }
+
+        if (item.has_serial_no) {
+            throw new Error(
+                "Serial-number-tracked items are not supported by this selector."
+            );
         }
 
         if (item.has_batch_no && !batch_no) {
-            throw new Error(`Select a batch for ${item_code}.`);
+            throw new Error(`A batch must be selected for ${item_code}.`);
         }
 
-        if (!item.has_batch_no) {
-            batch_no = "";
+        if (!frappe.meta.has_field(
+            "Quotation Item",
+            "custom_batch_no"
+        )) {
+            throw new Error(
+                "Quotation Item.custom_batch_no is missing. " +
+                "Create this Custom Field before scanning batch-tracked items."
+            );
         }
+
+        const has_row_warehouse = frappe.meta.has_field(
+            "Quotation Item",
+            "warehouse"
+        );
 
         const existing = (frm.doc.items || []).find((row) =>
             row.item_code === item_code &&
-            (row.warehouse || "") === (warehouse || "") &&
+            (
+                !has_row_warehouse ||
+                (row.warehouse || "") === (warehouse || "")
+            ) &&
             (row.custom_batch_no || "") === (batch_no || "")
         );
 
@@ -199,12 +315,19 @@
             );
 
             frm.refresh_field("items");
+
+            frappe.show_alert({
+                message: `Quantity increased: ${item_code}`,
+                indicator: "green"
+            });
+
             return;
         }
 
         const row = frm.add_child("items");
 
         try {
+            // Allow ERPNext to populate normal item details and pricing.
             await frappe.model.set_value(
                 row.doctype,
                 row.name,
@@ -213,14 +336,16 @@
             );
 
             const current = (frm.doc.items || []).find(
-                (r) => r.name === row.name
+                (child) => child.name === row.name
             );
 
             if (!current || current.item_code !== item_code) {
-                throw new Error(`ERPNext did not accept item ${item_code}.`);
+                throw new Error(
+                    `ERPNext did not accept item ${item_code}.`
+                );
             }
 
-            if (warehouse && frappe.meta.has_field("Quotation Item", "warehouse")) {
+            if (warehouse && has_row_warehouse) {
                 await frappe.model.set_value(
                     current.doctype,
                     current.name,
@@ -229,20 +354,25 @@
                 );
             }
 
-            if (batch_no) {
-                await frappe.model.set_value(
-                    current.doctype,
-                    current.name,
-                    "custom_batch_no",
-                    batch_no
-                );
-            }
+            await frappe.model.set_value(
+                current.doctype,
+                current.name,
+                "custom_batch_no",
+                batch_no || ""
+            );
 
             frm.refresh_field("items");
+
+            frappe.show_alert({
+                message: `Added ${item_code}` +
+                    (batch_no ? ` — Batch ${batch_no}` : ""),
+                indicator: "green"
+            });
         } catch (error) {
             frm.doc.items = (frm.doc.items || []).filter(
-                (r) => r.name !== row.name
+                (child) => child.name !== row.name
             );
+
             frm.refresh_field("items");
             throw error;
         }
@@ -254,102 +384,167 @@
         const barcode = String(raw_barcode || "").trim();
         if (!barcode) return;
 
-        const result = await call("scan_barcode_with_variants", {
-            search_value: barcode
-        });
+        const form_key = frm.docname || frm.doc.name || "new-quotation";
 
-        const selected = await choose_variant(result);
-        if (!selected) return;
-
-        const item_code = selected.item_code || selected.name;
-
-        if (!item_code) {
-            throw new Error("No concrete item was selected.");
+        if (busyForms.has(form_key)) {
+            frappe.show_alert({
+                message: "Finish the current item selection first.",
+                indicator: "orange"
+            });
+            return;
         }
 
-        const item_result = await frappe.db.get_value(
-            "Item",
-            item_code,
-            ["disabled", "has_batch_no", "has_variants", "variant_of"]
-        );
+        busyForms.add(form_key);
 
-        const item = item_result?.message;
+        try {
+            // 1. Resolve the scanned barcode.
+            const lookup = await call("scan_barcode_with_variants", {
+                search_value: barcode
+            });
 
-        if (!item || item.disabled) {
-            throw new Error(`Item ${item_code} is missing or disabled.`);
-        }
+            let selected = lookup;
 
-        if (item.has_variants && !item.variant_of) {
-            throw new Error("Select a concrete variant first.");
-        }
-
-        let warehouse = warehouse_for(frm);
-
-        if (frappe.meta.has_field("Quotation Item", "warehouse")) {
-            warehouse = warehouse || "";
-        } else {
-            warehouse = "";
-        }
-
-        let batch_no = "";
-
-        if (item.has_batch_no) {
-            if (!warehouse) {
-                frappe.throw(
-                    "Select a default Warehouse on the Quotation or set your user default Warehouse before scanning batch-tracked items."
-                );
-                return;
+            // 2. Select a concrete variant if the barcode is a template.
+            if (lookup.has_variants) {
+                selected = await select_variant(lookup.variants);
+                if (!selected) return;
             }
 
-            batch_no = await choose_batch(item_code, warehouse);
-            if (!batch_no) return;
+            const item_code = selected.item_code || selected.name;
+
+            if (!item_code) {
+                throw new Error("No concrete item was selected.");
+            }
+
+            if (selected.disabled) {
+                throw new Error(`Item ${item_code} is disabled.`);
+            }
+
+            if (selected.has_variants && !selected.variant_of) {
+                throw new Error(
+                    `Select a concrete variant for ${item_code}.`
+                );
+            }
+
+            if (selected.has_serial_no) {
+                throw new Error(
+                    "Serial-number-tracked items are not supported by this selector."
+                );
+            }
+
+            // 3. Select a batch only when the chosen item needs one.
+            let batch_no = "";
+            const warehouse = get_warehouse(frm);
+
+            if (selected.has_batch_no) {
+                if (!warehouse) {
+                    throw new Error(
+                        "Select a default Warehouse on the Quotation " +
+                        "or configure your user default Warehouse."
+                    );
+                }
+
+                batch_no = await select_batch(item_code, warehouse);
+                if (!batch_no) return;
+            }
+
+            // 4. Add the selected item after required selections.
+            await add_item(
+                frm,
+                {
+                    ...selected,
+                    item_code
+                },
+                warehouse,
+                batch_no
+            );
+        } finally {
+            busyForms.delete(form_key);
         }
-
-        await add_item(frm, item_code, warehouse, batch_no);
-
-        frappe.show_alert({
-            message: `Added ${item_code}${batch_no ? ` — Batch ${batch_no}` : ""}`,
-            indicator: "green"
-        });
     }
 
-    function bind_barcode_field(frm) {
-        const field = frm.fields_dict.custom_scan_barcode;
-        if (!field || !field.$input) return;
+    function install_scanner_patch() {
+        const Scanner = window.erpnext?.utils?.BarcodeScanner;
 
-        field.$input.off(".stQuotationBarcode");
+        if (!Scanner?.prototype?.process_scan) {
+            console.warn(
+                "StyleTone: standard BarcodeScanner.process_scan " +
+                "is not available yet on this Quotation form."
+            );
+            return false;
+        }
 
-        field.$input.on("keydown.stQuotationBarcode", function (event) {
-            if (event.key !== "Enter") return;
+        const proto = Scanner.prototype;
 
-            event.preventDefault();
+        if (proto[PATCH_FLAG]) {
+            return true;
+        }
 
-            const barcode = String(field.$input.val() || "").trim();
-            if (!barcode) return;
+        const original = proto.process_scan;
 
-            field.$input.val("");
+        proto.process_scan = function (...args) {
+            const frm = this.frm;
 
-            process_barcode(frm, barcode).catch((error) => {
-                frappe.msgprint({
-                    title: "Quotation Barcode Error",
-                    indicator: "red",
-                    message: escape(
-                        error?.message || "Barcode processing failed."
-                    )
-                });
-            });
+            // Every non-Quotation document retains the original scanner.
+            if (!supported(frm)) {
+                return original.apply(this, args);
+            }
+
+            const field = this.scan_barcode_field;
+
+            // Use only ERPNext's standard scan_barcode field.
+            const barcode = String(
+                frm.doc.scan_barcode ||
+                field?.get_value?.() ||
+                field?.$input?.val() ||
+                ""
+            ).trim();
+
+            if (!barcode) {
+                return original.apply(this, args);
+            }
+
+            // Clear the standard input before asynchronous selection.
+            frm.doc.scan_barcode = "";
+
+            if (field?.set_value) {
+                field.set_value("");
+            } else if (field?.$input) {
+                field.$input.val("");
+            }
+
+            if (frm.fields_dict.scan_barcode?.$input) {
+                frm.fields_dict.scan_barcode.$input.val("");
+            }
+
+            process_barcode(frm, barcode).catch(show_error);
+
+            return Promise.resolve();
+        };
+
+        Object.defineProperty(proto, PATCH_FLAG, {
+            value: true,
+            configurable: false
         });
+
+        console.info(
+            "StyleTone: optimized standard Quotation barcode scanner connected."
+        );
+
+        return true;
     }
 
     frappe.ui.form.on("Quotation", {
         refresh(frm) {
-            if (!supported(frm)) return;
-            bind_barcode_field(frm);
+            if (supported(frm)) {
+                install_scanner_patch();
+            }
         }
     });
 
     window.StyleToneQuotationBatch = {
         process_barcode,
-        supported
+        supported,
+        install_scanner_patch
     };
 })();
