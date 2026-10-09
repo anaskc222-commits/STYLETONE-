@@ -307,47 +307,39 @@
     // CHECK WHETHER BATCH DIALOG IS REQUIRED
     // ============================================================
 
-    function check_batch_required(frm, item) {
-
-        if (!frm || !item) {
-            return false;
-        }
-
-        // Only Sales Invoice
-        if (frm.doc.doctype !== "Sales Invoice") {
-            return false;
-        }
-
-        // Never modify POS
-        if (frm.doc.is_pos) {
-            return false;
-        }
-
-        // Only stock transactions
-        if (!frm.doc.update_stock) {
-            return false;
-        }
-
-        // Batch required
-        if (!item.has_batch_no) {
-            return false;
-        }
-
-        // Serial-only item
-        if (
-            item.has_serial_no &&
-            !item.has_batch_no
-        ) {
-            return false;
-        }
-
-        // Already selected
-        if (item.batch_no) {
-            return false;
-        }
-
-        return true;
+    
+function check_batch_required(frm, item) {
+    if (!frm || !item || !item.item_code) {
+        return false;
     }
+
+    // Standard ERPNext Sales Invoice only
+    if (frm.doc.doctype !== "Sales Invoice") {
+        return false;
+    }
+
+    // Do not modify POS
+    if (frm.doc.is_pos) {
+        return false;
+    }
+
+    // Only items that require batches
+    if (!item.has_batch_no) {
+        return false;
+    }
+
+    // Leave serial-number-only items to ERPNext
+    if (item.has_serial_no && !item.has_batch_no) {
+        return false;
+    }
+
+    // Skip rows where a batch is already selected
+    if (item.batch_no) {
+        return false;
+    }
+
+    return true;
+}
 
 
     // ============================================================
