@@ -1,3 +1,4 @@
+
 import frappe
 from frappe.utils import flt
 
@@ -8,13 +9,7 @@ from frappe.utils import flt
 
 @frappe.whitelist()
 def get_available_batches(item_code, warehouse=None):
-    """
-    Return positive-stock batches for an item in a warehouse.
-
-    Returns:
-        batch_no
-        expiry_date
-    """
+    """Return positive-stock batches for a batch-tracked item."""
 
     if not item_code or not warehouse:
         return []
@@ -26,14 +21,10 @@ def get_available_batches(item_code, warehouse=None):
         as_dict=True,
     )
 
-    if not item:
+    if not item or not item.has_batch_no:
         return []
 
-    # Batch-controlled items only
-    if not item.has_batch_no:
-        return []
-
-    # Serial + batch combination is left to ERPNext
+    # Let ERPNext handle serial-tracked items.
     if item.has_serial_no:
         return []
 
@@ -47,30 +38,22 @@ def get_available_batches(item_code, warehouse=None):
         ignore_reserved_stock=False,
     )
 
-    if not batches:
-        return []
-
     result = []
 
-    for row in batches:
+    for row in batches or []:
         batch_no = row.get("batch_no")
         qty = flt(row.get("qty"))
 
         if not batch_no or qty <= 0:
             continue
 
-        expiry_date = frappe.db.get_value(
-            "Batch",
-            batch_no,
-            "expiry_date",
-        )
-
-        result.append(
-            {
-                "batch_no": batch_no,
-                "expiry_date": expiry_date,
-            }
-        )
+        result.append({
+            "batch_no": batch_no,
+            "expiry_date": frappe.db.get_value(
+                "Batch", batch_no, "expiry_date"
+            ),
+            "qty": qty,
+        })
 
     return result
 
@@ -81,17 +64,7 @@ def get_available_batches(item_code, warehouse=None):
 
 @frappe.whitelist()
 def scan_barcode_with_variants(search_value, ctx=None):
-    """
-    Custom barcode lookup used only to detect whether the scanned
-    barcode belongs to:
-
-        1. A normal Item
-        2. An Item Variant
-        3. An Item Template with multiple Variants
-
-    The client-side code subsequently uses ERPNext's normal
-    barcode/item processing.
-    """
+    """Identify a normal item, variant, or template barcode."""
 
     if not search_value:
         return {}
@@ -99,21 +72,14 @@ def scan_barcode_with_variants(search_value, ctx=None):
     barcode_data = frappe.db.get_value(
         "Item Barcode",
         {"barcode": search_value},
-        [
-            "barcode",
-            "parent as item_code",
-            "uom",
-        ],
+        ["barcode", "parent as item_code", "uom"],
         as_dict=True,
     )
 
-    if not barcode_data:
+    if not barcode_data or not barcode_data.item_code:
         return {}
 
     item_code = barcode_data.item_code
-
-    if not item_code:
-        return {}
 
     item = frappe.get_cached_value(
         "Item",
@@ -132,42 +98,42 @@ def scan_barcode_with_variants(search_value, ctx=None):
     if not item or item.disabled:
         return {}
 
+    base_data = {
+        "barcode": barcode_data.barcode,
+        "item_code": item_code,
+        "uom": barcode_data.uom,
+        "item_name": item.item_name,
+        "has_batch_no": item.has_batch_no,
+        "has_serial_no": item.has_serial_no,
+    }
+
     # ----------------------------------------------------------
-    # Actual Variant
+    # Actual variant
     # ----------------------------------------------------------
 
     if item.variant_of:
         return {
-            "barcode": barcode_data.barcode,
-            "item_code": item_code,
-            "uom": barcode_data.uom,
-            "item_name": item.item_name,
-            "has_batch_no": item.has_batch_no,
-            "has_serial_no": item.has_serial_no,
+            **base_data,
             "is_variant": 1,
             "has_variants": 0,
             "variants": [],
         }
 
     # ----------------------------------------------------------
-    # Normal Item
+    # Normal item
     # ----------------------------------------------------------
 
     if not item.has_variants:
         return {
-            "barcode": barcode_data.barcode,
-            "item_code": item_code,
-            "uom": barcode_data.uom,
-            "item_name": item.item_name,
-            "has_batch_no": item.has_batch_no,
-            "has_serial_no": item.has_serial_no,
+            **base_data,
             "is_variant": 0,
             "has_variants": 0,
             "variants": [],
         }
 
     # ----------------------------------------------------------
-    # Template
+    # Template: return all enabled variants
+    # Do not filter by batch tracking.
     # ----------------------------------------------------------
 
     variants = frappe.get_all(
@@ -186,12 +152,7 @@ def scan_barcode_with_variants(search_value, ctx=None):
     )
 
     return {
-        "barcode": barcode_data.barcode,
-        "item_code": item_code,
-        "uom": barcode_data.uom,
-        "item_name": item.item_name,
-        "has_batch_no": item.has_batch_no,
-        "has_serial_no": item.has_serial_no,
+        **base_data,
         "is_variant": 0,
         "has_variants": 1,
         "variants": variants,
