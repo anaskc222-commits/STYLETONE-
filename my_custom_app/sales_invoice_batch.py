@@ -1,3 +1,4 @@
+
 import frappe
 
 
@@ -54,7 +55,7 @@ def scan_barcode_with_variants(search_value, ctx=None):
         "stock_uom": item.stock_uom,
     }
 
-    # A variant is already a selectable item.
+    # A concrete variant can be selected directly.
     if item.variant_of:
         return {
             **base_data,
@@ -63,7 +64,7 @@ def scan_barcode_with_variants(search_value, ctx=None):
             "variants": [],
         }
 
-    # A template must never be added directly to a Sales Invoice.
+    # Never add an Item Template directly to the invoice.
     if item.has_variants:
         variants = frappe.get_all(
             "Item",
