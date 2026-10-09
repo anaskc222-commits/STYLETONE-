@@ -7,6 +7,7 @@ app_license = "MIT"
 
 doctype_js = {
     "Sales Invoice": "public/js/sales_invoice_batch.js",
+"Quotation": "public/js/quotation_batch.js",
 }
 
 
