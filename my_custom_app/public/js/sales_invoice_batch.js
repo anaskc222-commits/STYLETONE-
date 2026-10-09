@@ -1,21 +1,22 @@
-
 /*
  * StyleTone - Sales Invoice Barcode + Batch Selector
- * ERPNext v16
+ * ERPNext v16 / Frappe v16
  *
  * Scope:
  *   Standard Desk Sales Invoice only.
- *   Does not patch TransactionController.prototype.
+ *   POS invoices are excluded.
  *
- * Behavior:
- *   1. Resolve scanned barcode using custom Python method.
- *   2. Show variant table for templates with multiple variants.
- *   3. Select batch BEFORE adding/updating the invoice row.
- *   4. Same item + same batch can reuse the matching row.
- *   5. Same item + different batch uses a different row.
- *   6. Non-batch items use ERPNext's normal row matching.
- *   7. Keep ERPNext scanner item processing for pricing, UOM,
- *      taxes and other standard item details.
+ * Features:
+ *   1. Resolve scanned barcode using the custom Python method.
+ *   2. Show variant selection for item templates.
+ *   3. Show batch selection for batch-tracked items.
+ *   4. Display Batch No, Expiry Date and Available Qty.
+ *   5. Select batch before updating the invoice.
+ *   6. Log scanner update details for troubleshooting.
+ *
+ * Python methods expected:
+ *   my_custom_app.sales_invoice_batch.scan_barcode_with_variants
+ *   my_custom_app.sales_invoice_batch.get_available_batches
  */
 
 (function () {
@@ -27,16 +28,12 @@
         return;
     }
 
-    // ------------------------------------------------------------
-    // BASIC HELPERS
-    // ------------------------------------------------------------
-
     function is_standard_sales_invoice(frm) {
         return !!(
             frm &&
             frm.doc &&
             frm.doc.doctype === "Sales Invoice" &&
-            !frm.doc.is_pos
+            !Number(frm.doc.is_pos)
         );
     }
 
@@ -45,13 +42,19 @@
     }
 
     function play_success(scanner) {
-        if (scanner && scanner.play_success_sound) {
+        if (
+            scanner &&
+            typeof scanner.play_success_sound === "function"
+        ) {
             scanner.play_success_sound();
         }
     }
 
     function play_failure(scanner) {
-        if (scanner && scanner.play_fail_sound) {
+        if (
+            scanner &&
+            typeof scanner.play_fail_sound === "function"
+        ) {
             scanner.play_fail_sound();
         }
     }
@@ -68,7 +71,11 @@
         const response = await frappe.db.get_value(
             "Item",
             item_code,
-            ["has_batch_no", "has_serial_no", "disabled"]
+            [
+                "has_batch_no",
+                "has_serial_no",
+                "disabled"
+            ]
         );
 
         const item = response && response.message;
@@ -86,15 +93,40 @@
     }
 
     function get_scan_warehouse(frm) {
-        // The invoice header warehouse is selected before scanning.
         return frm.doc.set_warehouse || null;
     }
 
-    // ------------------------------------------------------------
-    // BATCH DIALOG
-    // Returns the selected batch, or null if cancelled.
-    // Does not create or modify an invoice row.
-    // ------------------------------------------------------------
+    function format_expiry_date(expiry_date) {
+        if (!expiry_date) {
+            return escape_html(__("No Expiry Date"));
+        }
+
+        const value = String(expiry_date).trim();
+
+        // Only pass a recognized YYYY-MM-DD date to Frappe.
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+            console.warn(
+                "StyleTone: Invalid batch expiry date:",
+                expiry_date
+            );
+
+            return escape_html(__("No Expiry Date"));
+        }
+
+        try {
+            return escape_html(
+                frappe.datetime.str_to_user(value)
+            );
+        } catch (error) {
+            console.warn(
+                "StyleTone: Expiry date formatting failed:",
+                value,
+                error
+            );
+
+            return escape_html(value);
+        }
+    }
 
     async function select_batch(frm, item_code, warehouse) {
         if (!warehouse) {
@@ -103,6 +135,7 @@
                 __("Select Set Warehouse before scanning items."),
                 "orange"
             );
+
             return null;
         }
 
@@ -117,15 +150,27 @@
 
         const batches = (response && response.message) || [];
 
-        if (!batches.length) {
+        const available_batches = batches.filter(function (batch) {
+            return (
+                batch &&
+                batch.batch_no &&
+                Number(batch.qty) > 0
+            );
+        });
+
+        if (!available_batches.length) {
             show_message(
                 "No Available Batch",
                 __(
                     "No positive-stock batch is available for {0} in warehouse {1}.",
-                    [escape_html(item_code), escape_html(warehouse)]
+                    [
+                        escape_html(item_code),
+                        escape_html(warehouse)
+                    ]
                 ),
                 "orange"
             );
+
             return null;
         }
 
@@ -157,15 +202,12 @@
                         <tbody>
             `;
 
-            batches.forEach(function (batch, index) {
+            available_batches.forEach(function (batch, index) {
                 const batch_no = escape_html(batch.batch_no);
-                const expiry = batch.expiry_date
-                    ? escape_html(
-                        frappe.datetime.str_to_user(batch.expiry_date)
-                    )
-                    : escape_html(__("No Expiry Date"));
-
-                const qty = escape_html(batch.qty ?? 0);
+                const expiry = format_expiry_date(
+                    batch.expiry_date
+                );
+                const qty = escape_html(batch.qty);
 
                 html += `
                     <tr
@@ -202,6 +244,7 @@
                     }
                 ],
                 primary_action_label: __("Select"),
+
                 primary_action: function () {
                     const selected_index = dialog.$wrapper
                         .find(
@@ -217,10 +260,12 @@
                             message: __("Please select a batch."),
                             indicator: "orange"
                         });
+
                         return;
                     }
 
-                    const selected = batches[Number(selected_index)];
+                    const selected =
+                        available_batches[Number(selected_index)];
 
                     if (!selected || !selected.batch_no) {
                         show_message(
@@ -228,15 +273,15 @@
                             __("The selected batch is invalid."),
                             "red"
                         );
+
                         return;
                     }
 
                     dialog.hide();
                     finish(selected);
                 },
+
                 onhide: function () {
-                    // Closing the dialog without selecting a batch
-                    // cancels this scan. No row is added.
                     finish(null);
                 }
             });
@@ -250,7 +295,9 @@
                     const index = $(this).attr("data-index");
 
                     dialog.$wrapper
-                        .find('input[name="style-tone-batch-choice"]')
+                        .find(
+                            'input[name="style-tone-batch-choice"]'
+                        )
                         .prop("checked", false);
 
                     dialog.$wrapper
@@ -276,11 +323,6 @@
         });
     }
 
-    // ------------------------------------------------------------
-    // VARIANT DIALOG
-    // Returns the selected variant, or null if cancelled.
-    // ------------------------------------------------------------
-
     async function select_variant(variants) {
         if (!variants || !variants.length) {
             show_message(
@@ -290,6 +332,7 @@
                 ),
                 "orange"
             );
+
             return null;
         }
 
@@ -363,6 +406,7 @@
                     }
                 ],
                 primary_action_label: __("Select"),
+
                 primary_action: function () {
                     const selected_index = dialog.$wrapper
                         .find(
@@ -378,10 +422,12 @@
                             message: __("Please select a variant."),
                             indicator: "orange"
                         });
+
                         return;
                     }
 
-                    const selected = variants[Number(selected_index)];
+                    const selected =
+                        variants[Number(selected_index)];
 
                     if (!selected || !selected.item_code) {
                         show_message(
@@ -389,12 +435,14 @@
                             __("The selected variant is invalid."),
                             "red"
                         );
+
                         return;
                     }
 
                     dialog.hide();
                     finish(selected);
                 },
+
                 onhide: function () {
                     finish(null);
                 }
@@ -409,7 +457,9 @@
                     const index = $(this).attr("data-index");
 
                     dialog.$wrapper
-                        .find('input[name="style-tone-variant-choice"]')
+                        .find(
+                            'input[name="style-tone-variant-choice"]'
+                        )
                         .prop("checked", false);
 
                     dialog.$wrapper
@@ -435,27 +485,19 @@
         });
     }
 
-    // ------------------------------------------------------------
-    // BATCH-AWARE ROW MATCHING
-    //
-    // Installed on this scanner instance only.
-    // For batch scans, only an exact item + batch + UOM + warehouse
-    // row can be reused. A blank row can be used for a new item.
-    //
-    // Non-batch scans continue through ERPNext's original matcher.
-    // ------------------------------------------------------------
-
     function install_batch_row_matching(scanner) {
         if (scanner.__styleToneExactBatchMatching) {
             return;
         }
 
-        const original_match = scanner.get_row_to_modify_on_scan;
+        const original_match =
+            scanner.get_row_to_modify_on_scan;
 
         if (typeof original_match !== "function") {
             console.warn(
                 "StyleTone: ERPNext row-matching method not found."
             );
+
             return;
         }
 
@@ -478,17 +520,15 @@
             }
 
             const frm = this.frm;
-            const rows = (frm.doc[this.items_table_name] || []);
+            const rows = frm.doc[this.items_table_name] || [];
+
             const target_warehouse =
                 default_warehouse || get_scan_warehouse(frm);
 
-            // Find an exact batch match first. Do not reuse a row
-            // that has no batch number or a different batch number.
             const exact_row = rows.find(function (row) {
                 if (
                     row.item_code !== item_code ||
-                    row.batch_no !== batch_no ||
-                    row.has_item_scanned
+                    row.batch_no !== batch_no
                 ) {
                     return false;
                 }
@@ -511,9 +551,6 @@
                 return exact_row;
             }
 
-            // No exact batch row exists. Return a blank row if one
-            // is available; otherwise undefined tells ERPNext to
-            // create a new row.
             return rows.find(function (row) {
                 return !row.item_code;
             });
@@ -521,10 +558,6 @@
 
         scanner.__styleToneExactBatchMatching = true;
     }
-
-    // ------------------------------------------------------------
-    // CUSTOM BARCODE PROCESSING
-    // ------------------------------------------------------------
 
     function install_custom_scan(scanner) {
         if (
@@ -537,6 +570,10 @@
         const original_process_scan = scanner.process_scan;
 
         if (typeof original_process_scan !== "function") {
+            console.warn(
+                "StyleTone: scanner process_scan method not found."
+            );
+
             return;
         }
 
@@ -547,30 +584,52 @@
             const frm = me.frm;
 
             if (!is_standard_sales_invoice(frm)) {
-                return original_process_scan.apply(me, arguments);
+                return original_process_scan.apply(
+                    me,
+                    arguments
+                );
             }
 
-            // Prevent overlapping scans while a variant or batch
-            // dialog is open.
             if (me.__styleToneScanBusy) {
                 frappe.show_alert({
                     message: __("Please finish the current scan first."),
                     indicator: "orange"
                 });
+
                 return;
             }
 
-            const input = me.scan_barcode_field.value;
+            const scan_field = me.scan_barcode_field;
 
-            me.scan_barcode_field.set_value("");
+            if (!scan_field) {
+                console.error(
+                    "StyleTone: scanner barcode field was not found."
+                );
+
+                return;
+            }
+
+            const input =
+                typeof scan_field.get_value === "function"
+                    ? scan_field.get_value()
+                    : scan_field.value;
 
             if (!input) {
                 return;
             }
 
+            if (typeof scan_field.set_value === "function") {
+                scan_field.set_value("");
+            }
+
             me.__styleToneScanBusy = true;
 
             try {
+                console.log(
+                    "StyleTone: scanning barcode:",
+                    input
+                );
+
                 let response;
 
                 try {
@@ -586,31 +645,39 @@
                         }
                     });
                 } catch (lookup_error) {
-                    // If custom lookup fails, restore the barcode
-                    // and let ERPNext attempt its standard scan.
                     console.error(
-                        "StyleTone barcode lookup failed:",
+                        "StyleTone: barcode lookup failed:",
                         lookup_error
                     );
 
-                    me.scan_barcode_field.set_value(input);
+                    if (
+                        typeof scan_field.set_value === "function"
+                    ) {
+                        scan_field.set_value(input);
+                    }
 
                     return await original_process_scan.apply(me);
                 }
 
                 const data = (response && response.message) || {};
 
-                // No custom match: use ERPNext's standard scanner.
-                if (!data.item_code) {
-                    me.scan_barcode_field.set_value(input);
+                console.log(
+                    "StyleTone: barcode lookup result:",
+                    data
+                );
+
+                if (!data.item_code && !data.has_variants) {
+                    if (
+                        typeof scan_field.set_value === "function"
+                    ) {
+                        scan_field.set_value(input);
+                    }
+
                     return await original_process_scan.apply(me);
                 }
 
-                // Resolve a template barcode to an enabled variant.
-                let selected_variant = null;
-
                 if (data.has_variants) {
-                    selected_variant = await select_variant(
+                    const selected_variant = await select_variant(
                         data.variants || []
                     );
 
@@ -619,36 +686,42 @@
                     }
 
                     data.item_code = selected_variant.item_code;
-                    data.item_name = selected_variant.item_name || "";
+                    data.item_name =
+                        selected_variant.item_name || "";
                 }
 
-                // Always read tracking settings for the resolved
-                // item/variant rather than trusting template flags.
-                const tracking = await get_item_tracking(data.item_code);
+                if (!data.item_code) {
+                    throw new Error(
+                        "Barcode lookup did not return an item_code."
+                    );
+                }
 
-                data.has_batch_no = tracking.has_batch_no ? 1 : 0;
-                data.has_serial_no = tracking.has_serial_no ? 1 : 0;
+                const tracking = await get_item_tracking(
+                    data.item_code
+                );
+
+                data.has_batch_no =
+                    tracking.has_batch_no ? 1 : 0;
+
+                data.has_serial_no =
+                    tracking.has_serial_no ? 1 : 0;
 
                 delete data.variants;
                 delete data.has_variants;
                 delete data.is_variant;
 
-                // Use the header warehouse as the default context.
                 data.default_warehouse =
-                    data.default_warehouse || get_scan_warehouse(frm);
+                    data.default_warehouse ||
+                    get_scan_warehouse(frm);
 
-                // Select batch BEFORE update_table. If cancelled,
-                // no invoice row is added and no quantity changes.
                 if (
                     tracking.has_batch_no &&
                     !tracking.has_serial_no
                 ) {
-                    const warehouse = get_scan_warehouse(frm);
-
                     const selected_batch = await select_batch(
                         frm,
                         data.item_code,
-                        warehouse
+                        get_scan_warehouse(frm)
                     );
 
                     if (!selected_batch) {
@@ -658,9 +731,22 @@
                     data.batch_no = selected_batch.batch_no;
                 }
 
-                // Preserve ERPNext's own item processing, including
-                // quantity, UOM, item details and normal calculations.
+                console.log(
+                    "StyleTone: before update_table:",
+                    data
+                );
+
                 const row = await me.update_table(data);
+
+                console.log(
+                    "StyleTone: after update_table; returned row:",
+                    row
+                );
+
+                console.log(
+                    "StyleTone: invoice items after update:",
+                    frm.doc.items
+                );
 
                 play_success(me);
 
@@ -676,7 +762,7 @@
                 show_message(
                     "Barcode Scan Failed",
                     __(
-                        "The item could not be added. Check the item, warehouse and batch, then try again."
+                        "The item could not be added. Check the browser console for the exact error."
                     ),
                     "red"
                 );
@@ -690,16 +776,9 @@
         scanner.__styleToneCustomScanInstalled = true;
 
         console.log(
-            "StyleTone custom scanner installed on standard Sales Invoice."
+            "StyleTone: custom scanner installed on standard Sales Invoice."
         );
     }
-
-    // ------------------------------------------------------------
-    // INSTALLATION
-    //
-    // Attach through Sales Invoice form events and modify only the
-    // scanner instance. Do not patch TransactionController.prototype.
-    // ------------------------------------------------------------
 
     function try_install(frm) {
         if (!is_standard_sales_invoice(frm)) {
@@ -707,8 +786,10 @@
         }
 
         const controller = frm.cscript;
+
         const scanner =
-            controller && controller.barcode_scanner;
+            (controller && controller.barcode_scanner) ||
+            frm.barcode_scanner;
 
         if (!scanner) {
             return;
@@ -719,9 +800,8 @@
 
     frappe.ui.form.on("Sales Invoice", {
         onload_post_render: function (frm) {
-            // Controller setup creates the scanner. Retry briefly
-            // in case this event fires before it is available.
             let attempts = 0;
+            const max_attempts = 20;
 
             const timer = setInterval(function () {
                 attempts++;
@@ -734,8 +814,10 @@
                 try_install(frm);
 
                 const controller = frm.cscript;
+
                 const scanner =
-                    controller && controller.barcode_scanner;
+                    (controller && controller.barcode_scanner) ||
+                    frm.barcode_scanner;
 
                 if (
                     scanner &&
@@ -745,8 +827,9 @@
                     return;
                 }
 
-                if (attempts >= 20) {
+                if (attempts >= max_attempts) {
                     clearInterval(timer);
+
                     console.warn(
                         "StyleTone: could not find the Sales Invoice scanner."
                     );
