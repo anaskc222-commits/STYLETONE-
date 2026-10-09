@@ -3,20 +3,9 @@
  * StyleTone - Sales Invoice Barcode + Batch Selector
  * ERPNext v16 / Frappe v16
  *
- * Scope:
- *   Standard Desk Sales Invoice only.
- *   POS invoices are excluded.
+ * Standard Desk Sales Invoice only.
  *
- * Features:
- *   1. Resolve scanned barcode using custom Python method.
- *   2. Show variant selection for item templates.
- *   3. Show batch selection for batch-tracked items.
- *   4. Display Batch No, Expiry Date and Available Qty.
- *   5. Select batch before updating the invoice.
- *   6. Verify that the item and batch are added to the invoice.
- *   7. Prevent overlapping scans.
- *
- * Python methods:
+ * Required Python methods:
  *   my_custom_app.sales_invoice_batch.scan_barcode_with_variants
  *   my_custom_app.sales_invoice_batch.get_available_batches
  */
@@ -24,15 +13,15 @@
 (function () {
     "use strict";
 
-    const INSTALL_FLAG = "__styleToneSalesInvoiceBatchV2";
+    const INSTALL_FLAG = "__styleToneSalesInvoiceBatchV3";
 
     if (window[INSTALL_FLAG]) {
-        console.log("StyleTone: batch scanner already installed.");
+        console.log("StyleTone: scanner already installed.");
         return;
     }
 
     function is_standard_sales_invoice(frm) {
-        return !!(
+        return Boolean(
             frm &&
             frm.doc &&
             frm.doc.doctype === "Sales Invoice" &&
@@ -44,26 +33,28 @@
         return frappe.utils.escape_html(String(value ?? ""));
     }
 
+    function show_error(title, message) {
+        frappe.msgprint({
+            title: __(title),
+            message: message,
+            indicator: "red"
+        });
+    }
+
+    function get_scan_warehouse(frm) {
+        return frm.doc.set_warehouse || null;
+    }
+
     function play_success(scanner) {
-        if (scanner &&
-            typeof scanner.play_success_sound === "function") {
+        if (typeof scanner.play_success_sound === "function") {
             scanner.play_success_sound();
         }
     }
 
     function play_failure(scanner) {
-        if (scanner &&
-            typeof scanner.play_fail_sound === "function") {
+        if (typeof scanner.play_fail_sound === "function") {
             scanner.play_fail_sound();
         }
-    }
-
-    function show_message(title, message, indicator) {
-        frappe.msgprint({
-            title: __(title),
-            message: message,
-            indicator: indicator || "orange"
-        });
     }
 
     async function get_item_tracking(item_code) {
@@ -86,53 +77,32 @@
         }
 
         return {
-            has_batch_no: !!item.has_batch_no,
-            has_serial_no: !!item.has_serial_no
+            has_batch_no: Boolean(item.has_batch_no),
+            has_serial_no: Boolean(item.has_serial_no)
         };
     }
 
-    function get_scan_warehouse(frm) {
-        return frm.doc.set_warehouse || null;
-    }
-
-    function format_expiry_date(expiry_date) {
-        if (!expiry_date) {
-            return escape_html(__("No Expiry Date"));
-        }
-
-        const value = String(expiry_date).trim();
-
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-            console.warn(
-                "StyleTone: invalid batch expiry date:",
-                expiry_date
-            );
-
-            return escape_html(__("No Expiry Date"));
+    function format_expiry_date(value) {
+        if (!value) {
+            return __("No Expiry Date");
         }
 
         try {
-            return escape_html(
-                frappe.datetime.str_to_user(value)
-            );
+            return frappe.datetime.str_to_user(value);
         } catch (error) {
-            console.warn(
-                "StyleTone: expiry date formatting failed:",
-                value,
-                error
-            );
-
-            return escape_html(value);
+            return String(value);
         }
     }
 
     async function select_batch(frm, item_code, warehouse) {
         if (!warehouse) {
-            show_message(
-                "Warehouse Required",
-                __("Select Set Warehouse before scanning items."),
-                "orange"
-            );
+            frappe.msgprint({
+                title: __("Warehouse Required"),
+                message: __(
+                    "Select Set Warehouse before scanning items."
+                ),
+                indicator: "orange"
+            });
 
             return null;
         }
@@ -148,35 +118,47 @@
 
         const batches = (response && response.message) || [];
 
+        // Accept qty or available_qty, depending on the Python response.
         const available_batches = batches.filter(function (batch) {
-            return (
-                batch &&
-                batch.batch_no &&
-                Number(batch.qty) > 0
+            const qty = Number(
+                batch.qty ?? batch.available_qty ?? 0
             );
+
+            return Boolean(batch.batch_no) && qty > 0;
+        }).map(function (batch) {
+            return {
+                ...batch,
+                qty: Number(
+                    batch.qty ?? batch.available_qty ?? 0
+                )
+            };
         });
 
         if (!available_batches.length) {
-            show_message(
-                "No Available Batch",
-                __(
-                    "No positive-stock batch is available for {0} in warehouse {1}.",
+            frappe.msgprint({
+                title: __("No Available Batch"),
+                message: __(
+                    "No batch with positive available stock was returned for item {0} in warehouse {1}. Check the Python method get_available_batches and ensure it returns batch_no and qty.",
                     [
                         escape_html(item_code),
                         escape_html(warehouse)
                     ]
                 ),
-                "orange"
-            );
+                indicator: "orange"
+            });
 
             return null;
         }
 
         return new Promise(function (resolve) {
             let settled = false;
+            let dialog;
 
             function finish(value) {
-                if (settled) return;
+                if (settled) {
+                    return;
+                }
+
                 settled = true;
                 resolve(value);
             }
@@ -186,7 +168,7 @@
                     <table class="table table-bordered">
                         <thead>
                             <tr>
-                                <th style="width:45px;"></th>
+                                <th style="width:40px"></th>
                                 <th>${__("Batch No")}</th>
                                 <th>${__("Expiry Date")}</th>
                                 <th class="text-right">
@@ -199,20 +181,18 @@
 
             available_batches.forEach(function (batch, index) {
                 html += `
-                    <tr
-                        class="style-tone-batch-row"
+                    <tr class="style-tone-batch-row"
                         data-index="${index}"
-                        style="cursor:pointer;"
-                    >
+                        style="cursor:pointer">
                         <td class="text-center">
-                            <input
-                                type="radio"
+                            <input type="radio"
                                 name="style-tone-batch-choice"
-                                value="${index}"
-                            >
+                                value="${index}">
                         </td>
                         <td>${escape_html(batch.batch_no)}</td>
-                        <td>${format_expiry_date(batch.expiry_date)}</td>
+                        <td>${escape_html(
+                            format_expiry_date(batch.expiry_date)
+                        )}</td>
                         <td class="text-right">
                             ${escape_html(batch.qty)}
                         </td>
@@ -226,7 +206,7 @@
                 </div>
             `;
 
-            const dialog = new frappe.ui.Dialog({
+            dialog = new frappe.ui.Dialog({
                 title: __("Select Batch"),
                 fields: [
                     {
@@ -258,19 +238,25 @@
                         available_batches[Number(selected_index)];
 
                     if (!selected || !selected.batch_no) {
-                        show_message(
-                            "Invalid Batch",
-                            __("The selected batch is invalid."),
-                            "red"
+                        frappe.msgprint(
+                            __("The selected batch is invalid.")
                         );
                         return;
                     }
 
-                    dialog.hide();
+                    console.log(
+                        "StyleTone: selected batch:",
+                        selected.batch_no,
+                        selected
+                    );
+
+                    // IMPORTANT: resolve selection BEFORE hiding the dialog.
                     finish(selected);
+                    dialog.hide();
                 },
 
                 onhide: function () {
+                    // If Select already resolved the promise, this does nothing.
                     finish(null);
                 }
             });
@@ -314,14 +300,9 @@
 
     async function select_variant(variants) {
         if (!variants || !variants.length) {
-            show_message(
-                "No Enabled Variants",
-                __(
-                    "This item template has no enabled variants available."
-                ),
-                "orange"
+            frappe.msgprint(
+                __("No enabled variants are available.")
             );
-
             return null;
         }
 
@@ -331,9 +312,13 @@
 
         return new Promise(function (resolve) {
             let settled = false;
+            let dialog;
 
             function finish(value) {
-                if (settled) return;
+                if (settled) {
+                    return;
+                }
+
                 settled = true;
                 resolve(value);
             }
@@ -343,10 +328,9 @@
                     <table class="table table-bordered">
                         <thead>
                             <tr>
-                                <th style="width:45px;"></th>
+                                <th style="width:40px"></th>
                                 <th>${__("Item Code")}</th>
                                 <th>${__("Item Name")}</th>
-                                <th>${__("Batch Tracked")}</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -354,25 +338,16 @@
 
             variants.forEach(function (variant, index) {
                 html += `
-                    <tr
-                        class="style-tone-variant-row"
+                    <tr class="style-tone-variant-row"
                         data-index="${index}"
-                        style="cursor:pointer;"
-                    >
+                        style="cursor:pointer">
                         <td class="text-center">
-                            <input
-                                type="radio"
+                            <input type="radio"
                                 name="style-tone-variant-choice"
-                                value="${index}"
-                            >
+                                value="${index}">
                         </td>
                         <td>${escape_html(variant.item_code)}</td>
                         <td>${escape_html(variant.item_name || "")}</td>
-                        <td>
-                            ${variant.has_batch_no
-                                ? __("Yes")
-                                : __("No")}
-                        </td>
                     </tr>
                 `;
             });
@@ -383,7 +358,7 @@
                 </div>
             `;
 
-            const dialog = new frappe.ui.Dialog({
+            dialog = new frappe.ui.Dialog({
                 title: __("Select Variant"),
                 fields: [
                     {
@@ -411,20 +386,18 @@
                         return;
                     }
 
-                    const selected =
-                        variants[Number(selected_index)];
+                    const selected = variants[Number(selected_index)];
 
                     if (!selected || !selected.item_code) {
-                        show_message(
-                            "Invalid Variant",
-                            __("The selected variant is invalid."),
-                            "red"
+                        frappe.msgprint(
+                            __("The selected variant is invalid.")
                         );
                         return;
                     }
 
-                    dialog.hide();
+                    // Resolve before hiding to avoid the onhide race.
                     finish(selected);
+                    dialog.hide();
                 },
 
                 onhide: function () {
@@ -469,88 +442,8 @@
         });
     }
 
-    function install_batch_row_matching(scanner) {
-        if (scanner.__styleToneExactBatchMatching) {
-            return;
-        }
-
-        const original_match =
-            scanner.get_row_to_modify_on_scan;
-
-        if (typeof original_match !== "function") {
-            console.warn(
-                "StyleTone: ERPNext row-matching method not found."
-            );
-            return;
-        }
-
-        scanner.get_row_to_modify_on_scan = function (
-            item_code,
-            batch_no,
-            uom,
-            barcode,
-            default_warehouse
-        ) {
-            if (!batch_no) {
-                return original_match.call(
-                    this,
-                    item_code,
-                    batch_no,
-                    uom,
-                    barcode,
-                    default_warehouse
-                );
-            }
-
-            const frm = this.frm;
-            const rows = frm.doc[this.items_table_name] || [];
-
-            const target_warehouse =
-                default_warehouse || get_scan_warehouse(frm);
-
-            const exact_row = rows.find(function (row) {
-                if (
-                    row.item_code !== item_code ||
-                    row.batch_no !== batch_no
-                ) {
-                    return false;
-                }
-
-                if (uom && row.uom !== uom) {
-                    return false;
-                }
-
-                if (
-                    target_warehouse &&
-                    row.warehouse !== target_warehouse
-                ) {
-                    return false;
-                }
-
-                return true;
-            });
-
-            if (exact_row) {
-                return exact_row;
-            }
-
-            return rows.find(function (row) {
-                return !row.item_code;
-            });
-        };
-
-        scanner.__styleToneExactBatchMatching = true;
-    }
-
-    /*
-     * Confirm the scanned item and selected batch exist after
-     * ERPNext processes the scan. Do not count an unrelated
-     * existing batch row as a successful update.
-     */
-    function find_scanned_row(frm, data) {
-        const rows = frm.doc.items || [];
-
-        return rows.find(function (row) {
+    function find_invoice_row(frm, data) {
+        return (frm.doc.items || []).find(function (row) {
             if (row.item_code !== data.item_code) {
                 return false;
             }
@@ -570,81 +463,77 @@
                 return false;
             }
 
-            if (data.uom && row.uom !== data.uom) {
-                return false;
-            }
-
             return true;
         });
     }
 
-    async function update_invoice_item(scanner, data) {
+    async function add_scanned_item(scanner, data) {
         const frm = scanner.frm;
 
         if (!frm || !frm.doc) {
             throw new Error("Sales Invoice form is unavailable.");
         }
 
-        const expected_row_before = find_scanned_row(frm, data);
-
-        console.log(
-            "StyleTone: before update_table:",
-            data
-        );
-
-        /*
-         * ERPNext may have an empty placeholder row.
-         * Determine whether the invoice has a real item before
-         * allowing the standard scanner to decide its update path.
-         */
-        const previous_has_items = frm.has_items;
-
-        const has_populated_items = (frm.doc.items || []).some(
-            function (row) {
-                return !!row.item_code;
-            }
-        );
-
-        try {
-            if (!has_populated_items) {
-                frm.has_items = false;
-            }
-
-            await scanner.update_table(data);
-        } finally {
-            frm.has_items = previous_has_items;
+        if (!data.item_code) {
+            throw new Error("The scan result has no item_code.");
         }
 
-        let row = find_scanned_row(frm, data);
+        // Make sure the scanner receives a usable quantity.
+        if (!data.qty || Number(data.qty) <= 0) {
+            data.qty = 1;
+        }
+
+        data.default_warehouse =
+            data.default_warehouse ||
+            get_scan_warehouse(frm);
+
+        console.log(
+            "StyleTone: adding item to invoice:",
+            {
+                item_code: data.item_code,
+                batch_no: data.batch_no || null,
+                qty: data.qty,
+                warehouse: data.default_warehouse
+            }
+        );
 
         /*
-         * Fallback only when the standard update did not create
-         * or update the expected item/batch row.
+         * Use ERPNext's own scanner methods to add/update rows.
+         * Do not manually insert a child row: ERPNext must fetch
+         * item details, price, taxes, UOM, and stock information.
          */
-        if (!row && typeof scanner.add_item_to_table === "function") {
+        if (typeof scanner.update_table === "function") {
+            await scanner.update_table(data);
+        } else if (
+            typeof scanner.add_item_to_table === "function"
+        ) {
+            await scanner.add_item_to_table(data);
+        } else {
+            throw new Error(
+                "ERPNext scanner has neither update_table nor add_item_to_table."
+            );
+        }
+
+        let row = find_invoice_row(frm, data);
+
+        // If update_table did not add a row, try ERPNext's add method.
+        if (
+            !row &&
+            typeof scanner.add_item_to_table === "function" &&
+            typeof scanner.update_table === "function"
+        ) {
             console.warn(
-                "StyleTone: update_table did not produce the expected row; trying add_item_to_table."
+                "StyleTone: update_table did not add the expected row; trying add_item_to_table."
             );
 
             await scanner.add_item_to_table(data);
-            row = find_scanned_row(frm, data);
+            row = find_invoice_row(frm, data);
         }
 
-        /*
-         * Allow any synchronous model updates to settle, then
-         * verify once more before declaring success.
-         */
-        if (!row) {
-            row = find_scanned_row(frm, data);
-        }
+        frm.refresh_field("items");
 
         console.log(
-            "StyleTone: after update; expected row:",
-            row
-        );
-
-        console.log(
-            "StyleTone: invoice items after update:",
+            "StyleTone: invoice rows after scan:",
             (frm.doc.items || []).map(function (item) {
                 return {
                     item_code: item.item_code,
@@ -657,16 +546,29 @@
 
         if (!row) {
             throw new Error(
-                "ERPNext did not create the expected invoice row for item " +
+                "The scanner returned without creating the expected invoice row for item " +
                 data.item_code +
-                (data.batch_no ? ", batch " + data.batch_no : "") +
-                ". Check the console for update_table/add_item_to_table errors."
+                (data.batch_no ? " and batch " + data.batch_no : "") +
+                ". Check the console for the scanner error."
+            );
+        }
+
+        /*
+         * Ensure the selected batch is retained on the actual row.
+         * The selected batch is still validated by ERPNext when saving.
+         */
+        if (data.batch_no && row.batch_no !== data.batch_no) {
+            await frappe.model.set_value(
+                row.doctype,
+                row.name,
+                "batch_no",
+                data.batch_no
             );
         }
 
         frm.refresh_field("items");
 
-        return row || expected_row_before;
+        return row;
     }
 
     function install_custom_scan(scanner) {
@@ -686,17 +588,12 @@
             return;
         }
 
-        install_batch_row_matching(scanner);
-
         scanner.process_scan = async function () {
             const me = this;
             const frm = me.frm;
 
             if (!is_standard_sales_invoice(frm)) {
-                return original_process_scan.apply(
-                    me,
-                    arguments
-                );
+                return original_process_scan.apply(me, arguments);
             }
 
             if (me.__styleToneScanBusy) {
@@ -711,17 +608,17 @@
 
             if (!scan_field) {
                 console.error(
-                    "StyleTone: scanner barcode field was not found."
+                    "StyleTone: barcode scan field not found."
                 );
                 return;
             }
 
-            const input =
+            const barcode =
                 typeof scan_field.get_value === "function"
                     ? scan_field.get_value()
                     : scan_field.value;
 
-            if (!input) {
+            if (!barcode) {
                 return;
             }
 
@@ -734,37 +631,20 @@
             try {
                 console.log(
                     "StyleTone: scanning barcode:",
-                    input
+                    barcode
                 );
 
-                let response;
-
-                try {
-                    response = await frappe.call({
-                        method:
-                            "my_custom_app.sales_invoice_batch.scan_barcode_with_variants",
-                        args: {
-                            search_value: input,
-                            ctx: {
-                                set_warehouse: frm.doc.set_warehouse,
-                                company: frm.doc.company
-                            }
+                const response = await frappe.call({
+                    method:
+                        "my_custom_app.sales_invoice_batch.scan_barcode_with_variants",
+                    args: {
+                        search_value: barcode,
+                        ctx: {
+                            set_warehouse: frm.doc.set_warehouse,
+                            company: frm.doc.company
                         }
-                    });
-                } catch (lookup_error) {
-                    console.error(
-                        "StyleTone: barcode lookup failed:",
-                        lookup_error
-                    );
-
-                    if (
-                        typeof scan_field.set_value === "function"
-                    ) {
-                        scan_field.set_value(input);
                     }
-
-                    return await original_process_scan.apply(me);
-                }
+                });
 
                 const data = (response && response.message) || {};
 
@@ -774,27 +654,25 @@
                 );
 
                 if (!data.item_code && !data.has_variants) {
-                    if (
-                        typeof scan_field.set_value === "function"
-                    ) {
-                        scan_field.set_value(input);
+                    // Preserve normal ERPNext behavior for unrecognized barcodes.
+                    if (typeof scan_field.set_value === "function") {
+                        scan_field.set_value(barcode);
                     }
 
                     return await original_process_scan.apply(me);
                 }
 
                 if (data.has_variants) {
-                    const selected_variant = await select_variant(
+                    const variant = await select_variant(
                         data.variants || []
                     );
 
-                    if (!selected_variant) {
+                    if (!variant) {
                         return;
                     }
 
-                    data.item_code = selected_variant.item_code;
-                    data.item_name =
-                        selected_variant.item_name || "";
+                    data.item_code = variant.item_code;
+                    data.item_name = variant.item_name || "";
                 }
 
                 if (!data.item_code) {
@@ -803,63 +681,60 @@
                     );
                 }
 
-                const tracking = await get_item_tracking(
-                    data.item_code
-                );
+                const tracking = await get_item_tracking(data.item_code);
 
-                data.has_batch_no =
-                    tracking.has_batch_no ? 1 : 0;
-
-                data.has_serial_no =
-                    tracking.has_serial_no ? 1 : 0;
+                data.has_batch_no = tracking.has_batch_no ? 1 : 0;
+                data.has_serial_no = tracking.has_serial_no ? 1 : 0;
+                data.default_warehouse =
+                    data.default_warehouse ||
+                    get_scan_warehouse(frm);
 
                 delete data.variants;
                 delete data.has_variants;
                 delete data.is_variant;
 
-                data.default_warehouse =
-                    data.default_warehouse ||
-                    get_scan_warehouse(frm);
-
                 if (
                     tracking.has_batch_no &&
                     !tracking.has_serial_no
                 ) {
-                    const selected_batch = await select_batch(
+                    const batch = await select_batch(
                         frm,
                         data.item_code,
                         get_scan_warehouse(frm)
                     );
 
-                    if (!selected_batch) {
+                    if (!batch) {
                         console.log(
                             "StyleTone: batch selection cancelled."
                         );
                         return;
                     }
 
-                    data.batch_no = selected_batch.batch_no;
-
+                    data.batch_no = batch.batch_no;
                     console.log(
-                        "StyleTone: selected batch:",
+                        "StyleTone: selected batch confirmed:",
                         data.batch_no
                     );
                 }
 
-                const row = await update_invoice_item(me, data);
+                data.qty = Number(data.qty) > 0
+                    ? Number(data.qty)
+                    : 1;
+
+                const row = await add_scanned_item(me, data);
 
                 console.log(
                     "StyleTone: item successfully processed:",
                     {
                         item_code: data.item_code,
                         batch_no: data.batch_no || null,
-                        row_name: row && row.name
+                        row_name: row.name
                     }
                 );
 
                 play_success(me);
-
                 return row;
+
             } catch (error) {
                 console.error(
                     "StyleTone Sales Invoice scan failed:",
@@ -868,15 +743,13 @@
 
                 play_failure(me);
 
-                show_message(
+                show_error(
                     "Barcode Scan Failed",
-                    __(
-                        "The item could not be added. Check the browser console for the exact error."
-                    ),
-                    "red"
+                    escape_html(error.message || String(error))
                 );
 
                 throw error;
+
             } finally {
                 me.__styleToneScanBusy = false;
             }
@@ -894,17 +767,13 @@
             return;
         }
 
-        const controller = frm.cscript;
-
         const scanner =
-            (controller && controller.barcode_scanner) ||
+            (frm.cscript && frm.cscript.barcode_scanner) ||
             frm.barcode_scanner;
 
-        if (!scanner) {
-            return;
+        if (scanner) {
+            install_custom_scan(scanner);
         }
-
-        install_custom_scan(scanner);
     }
 
     frappe.ui.form.on("Sales Invoice", {
@@ -922,10 +791,8 @@
 
                 try_install(frm);
 
-                const controller = frm.cscript;
-
                 const scanner =
-                    (controller && controller.barcode_scanner) ||
+                    (frm.cscript && frm.cscript.barcode_scanner) ||
                     frm.barcode_scanner;
 
                 if (
@@ -938,7 +805,6 @@
 
                 if (attempts >= max_attempts) {
                     clearInterval(timer);
-
                     console.warn(
                         "StyleTone: could not find the Sales Invoice scanner."
                     );
