@@ -1,11 +1,10 @@
 
-/* STYLETONE - ERPNext v16 Quotation barcode / batch selector
+/* STYLETONE - ERPNext v16 Quotation Barcode / Batch Selector
  *
  * Standard scan_barcode field
- * Barcode -> Variant popup if template
- *         -> Batch popup if batch-tracked
- *         -> Add item to Quotation
+ * Barcode -> Variant selection -> Batch selection -> Add item
  *
+ * Common warehouse: Quotation.custom_warehouse
  * Batch reference: Quotation Item.custom_batch_no
  * Does not intentionally change Sales Invoice or POSNext behavior.
  */
@@ -14,7 +13,7 @@
     "use strict";
 
     const API = "my_custom_app.quotation_batch";
-    const PATCH_FLAG = "__styleToneQuotationBarcodePatchV2";
+    const PATCH_FLAG = "__styleToneQuotationBarcodePatchV3";
     const busyForms = new Set();
 
     function supported(frm) {
@@ -30,6 +29,8 @@
     }
 
     function show_error(error) {
+        console.error("StyleTone Quotation barcode error:", error);
+
         frappe.msgprint({
             title: "Quotation Barcode / Batch Error",
             indicator: "red",
@@ -41,12 +42,9 @@
         });
     }
 
+    // One common warehouse for every item in this Quotation.
     function get_warehouse(frm) {
-        return (
-            frm.doc.set_warehouse ||
-            frappe.defaults.get_user_default("Warehouse") ||
-            ""
-        );
+        return String(frm.doc.custom_warehouse || "").trim();
     }
 
     function call(method, args) {
@@ -55,11 +53,15 @@
             args
         }).then((response) => {
             if (response.exc) {
-                throw new Error("The server could not complete the request.");
+                throw new Error(
+                    `Server error while running ${method}. Check Error Log.`
+                );
             }
 
             if (response.message === undefined) {
-                throw new Error(`No result returned by ${method}.`);
+                throw new Error(
+                    `No result returned by ${method}.`
+                );
             }
 
             return response.message;
@@ -91,6 +93,7 @@
             }
 
             let finished = false;
+            let dialog;
 
             function finish(value) {
                 if (finished) return;
@@ -115,7 +118,7 @@
                 </tr>
             `).join("");
 
-            const dialog = make_dialog(
+            dialog = make_dialog(
                 "Select Item Variant",
                 "variant_table",
                 `
@@ -169,6 +172,7 @@
     function select_batch(item_code, warehouse) {
         return new Promise((resolve, reject) => {
             let finished = false;
+            let dialog;
 
             function finish(value) {
                 if (finished) return;
@@ -181,10 +185,15 @@
                 warehouse
             }).then((batches) => {
                 if (!Array.isArray(batches) || !batches.length) {
-                    reject(new Error(
-                        `No positive-quantity batches found for ` +
-                        `${item_code} in ${warehouse}.`
-                    ));
+                    finish(null);
+                    frappe.msgprint({
+                        title: "No Available Batch",
+                        indicator: "orange",
+                        message:
+                            `No positive-quantity batch was found for ` +
+                            `<b>${esc(item_code)}</b> in warehouse ` +
+                            `<b>${esc(warehouse)}</b>.`
+                    });
                     return;
                 }
 
@@ -204,10 +213,13 @@
                     </tr>
                 `).join("");
 
-                const dialog = make_dialog(
+                dialog = make_dialog(
                     `Select Batch — ${item_code}`,
                     "batch_table",
                     `
+                        <p>
+                            <b>Warehouse:</b> ${esc(warehouse)}
+                        </p>
                         <div class="table-responsive">
                             <table class="table table-bordered table-hover">
                                 <thead>
@@ -297,12 +309,9 @@
             "warehouse"
         );
 
+        // Reuse a row only when item, common warehouse and batch match.
         const existing = (frm.doc.items || []).find((row) =>
             row.item_code === item_code &&
-            (
-                !has_row_warehouse ||
-                (row.warehouse || "") === (warehouse || "")
-            ) &&
             (row.custom_batch_no || "") === (batch_no || "")
         );
 
@@ -313,6 +322,15 @@
                 "qty",
                 flt(existing.qty || 0) + 1
             );
+
+            if (has_row_warehouse && warehouse) {
+                await frappe.model.set_value(
+                    existing.doctype,
+                    existing.name,
+                    "warehouse",
+                    warehouse
+                );
+            }
 
             frm.refresh_field("items");
 
@@ -327,7 +345,7 @@
         const row = frm.add_child("items");
 
         try {
-            // Allow ERPNext to populate normal item details and pricing.
+            // Let ERPNext populate standard item details and pricing.
             await frappe.model.set_value(
                 row.doctype,
                 row.name,
@@ -345,7 +363,7 @@
                 );
             }
 
-            if (warehouse && has_row_warehouse) {
+            if (has_row_warehouse && warehouse) {
                 await frappe.model.set_value(
                     current.doctype,
                     current.name,
@@ -364,7 +382,8 @@
             frm.refresh_field("items");
 
             frappe.show_alert({
-                message: `Added ${item_code}` +
+                message:
+                    `Added ${item_code}` +
                     (batch_no ? ` — Batch ${batch_no}` : ""),
                 indicator: "green"
             });
@@ -397,14 +416,14 @@
         busyForms.add(form_key);
 
         try {
-            // 1. Resolve the scanned barcode.
+            // Resolve barcode first.
             const lookup = await call("scan_barcode_with_variants", {
                 search_value: barcode
             });
 
             let selected = lookup;
 
-            // 2. Select a concrete variant if the barcode is a template.
+            // Select a concrete variant when the barcode resolves to a template.
             if (lookup.has_variants) {
                 selected = await select_variant(lookup.variants);
                 if (!selected) return;
@@ -432,23 +451,25 @@
                 );
             }
 
-            // 3. Select a batch only when the chosen item needs one.
-            let batch_no = "";
+            // Always use the Quotation's common custom_warehouse.
             const warehouse = get_warehouse(frm);
 
-            if (selected.has_batch_no) {
-                if (!warehouse) {
-                    throw new Error(
-                        "Select a default Warehouse on the Quotation " +
-                        "or configure your user default Warehouse."
-                    );
-                }
+            if (!warehouse) {
+                throw new Error(
+                    "Please select Custom Warehouse on the Quotation " +
+                    "before scanning items."
+                );
+            }
 
+            // Select a batch only for batch-tracked items.
+            let batch_no = "";
+
+            if (selected.has_batch_no) {
                 batch_no = await select_batch(item_code, warehouse);
                 if (!batch_no) return;
             }
 
-            // 4. Add the selected item after required selections.
+            // Add the item after all required selections.
             await add_item(
                 frm,
                 {
@@ -468,8 +489,7 @@
 
         if (!Scanner?.prototype?.process_scan) {
             console.warn(
-                "StyleTone: standard BarcodeScanner.process_scan " +
-                "is not available yet on this Quotation form."
+                "StyleTone: BarcodeScanner.process_scan is not available yet."
             );
             return false;
         }
@@ -485,18 +505,19 @@
         proto.process_scan = function (...args) {
             const frm = this.frm;
 
-            // Every non-Quotation document retains the original scanner.
+            // All non-Quotation documents use ERPNext's original scanner.
             if (!supported(frm)) {
                 return original.apply(this, args);
             }
 
             const field = this.scan_barcode_field;
 
-            // Use only ERPNext's standard scan_barcode field.
+            // Read only the standard scan_barcode field.
             const barcode = String(
                 frm.doc.scan_barcode ||
                 field?.get_value?.() ||
                 field?.$input?.val() ||
+                frm.fields_dict.scan_barcode?.$input?.val() ||
                 ""
             ).trim();
 
@@ -504,7 +525,7 @@
                 return original.apply(this, args);
             }
 
-            // Clear the standard input before asynchronous selection.
+            // Clear the standard scan field before opening dialogs.
             frm.doc.scan_barcode = "";
 
             if (field?.set_value) {
@@ -528,7 +549,8 @@
         });
 
         console.info(
-            "StyleTone: optimized standard Quotation barcode scanner connected."
+            "StyleTone: Quotation barcode scanner connected. " +
+            "Warehouse source: custom_warehouse."
         );
 
         return true;
