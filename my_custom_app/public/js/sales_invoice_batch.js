@@ -8,14 +8,15 @@
  *   POS invoices are excluded.
  *
  * Features:
- *   1. Resolve scanned barcode using the custom Python method.
+ *   1. Resolve scanned barcode using custom Python method.
  *   2. Show variant selection for item templates.
  *   3. Show batch selection for batch-tracked items.
  *   4. Display Batch No, Expiry Date and Available Qty.
  *   5. Select batch before updating the invoice.
- *   6. Log scanner update details for troubleshooting.
+ *   6. Verify that the item and batch are added to the invoice.
+ *   7. Prevent overlapping scans.
  *
- * Python methods expected:
+ * Python methods:
  *   my_custom_app.sales_invoice_batch.scan_barcode_with_variants
  *   my_custom_app.sales_invoice_batch.get_available_batches
  */
@@ -26,6 +27,7 @@
     const INSTALL_FLAG = "__styleToneSalesInvoiceBatchV2";
 
     if (window[INSTALL_FLAG]) {
+        console.log("StyleTone: batch scanner already installed.");
         return;
     }
 
@@ -43,19 +45,15 @@
     }
 
     function play_success(scanner) {
-        if (
-            scanner &&
-            typeof scanner.play_success_sound === "function"
-        ) {
+        if (scanner &&
+            typeof scanner.play_success_sound === "function") {
             scanner.play_success_sound();
         }
     }
 
     function play_failure(scanner) {
-        if (
-            scanner &&
-            typeof scanner.play_fail_sound === "function"
-        ) {
+        if (scanner &&
+            typeof scanner.play_fail_sound === "function") {
             scanner.play_fail_sound();
         }
     }
@@ -104,10 +102,9 @@
 
         const value = String(expiry_date).trim();
 
-        // Only pass a recognized YYYY-MM-DD date to Frappe.
         if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
             console.warn(
-                "StyleTone: Invalid batch expiry date:",
+                "StyleTone: invalid batch expiry date:",
                 expiry_date
             );
 
@@ -120,7 +117,7 @@
             );
         } catch (error) {
             console.warn(
-                "StyleTone: Expiry date formatting failed:",
+                "StyleTone: expiry date formatting failed:",
                 value,
                 error
             );
@@ -179,10 +176,7 @@
             let settled = false;
 
             function finish(value) {
-                if (settled) {
-                    return;
-                }
-
+                if (settled) return;
                 settled = true;
                 resolve(value);
             }
@@ -204,12 +198,6 @@
             `;
 
             available_batches.forEach(function (batch, index) {
-                const batch_no = escape_html(batch.batch_no);
-                const expiry = format_expiry_date(
-                    batch.expiry_date
-                );
-                const qty = escape_html(batch.qty);
-
                 html += `
                     <tr
                         class="style-tone-batch-row"
@@ -223,9 +211,11 @@
                                 value="${index}"
                             >
                         </td>
-                        <td>${batch_no}</td>
-                        <td>${expiry}</td>
-                        <td class="text-right">${qty}</td>
+                        <td>${escape_html(batch.batch_no)}</td>
+                        <td>${format_expiry_date(batch.expiry_date)}</td>
+                        <td class="text-right">
+                            ${escape_html(batch.qty)}
+                        </td>
                     </tr>
                 `;
             });
@@ -261,7 +251,6 @@
                             message: __("Please select a batch."),
                             indicator: "orange"
                         });
-
                         return;
                     }
 
@@ -274,7 +263,6 @@
                             __("The selected batch is invalid."),
                             "red"
                         );
-
                         return;
                     }
 
@@ -345,10 +333,7 @@
             let settled = false;
 
             function finish(value) {
-                if (settled) {
-                    return;
-                }
-
+                if (settled) return;
                 settled = true;
                 resolve(value);
             }
@@ -423,7 +408,6 @@
                             message: __("Please select a variant."),
                             indicator: "orange"
                         });
-
                         return;
                     }
 
@@ -436,7 +420,6 @@
                             __("The selected variant is invalid."),
                             "red"
                         );
-
                         return;
                     }
 
@@ -498,7 +481,6 @@
             console.warn(
                 "StyleTone: ERPNext row-matching method not found."
             );
-
             return;
         }
 
@@ -560,6 +542,133 @@
         scanner.__styleToneExactBatchMatching = true;
     }
 
+    /*
+     * Confirm the scanned item and selected batch exist after
+     * ERPNext processes the scan. Do not count an unrelated
+     * existing batch row as a successful update.
+     */
+    function find_scanned_row(frm, data) {
+        const rows = frm.doc.items || [];
+
+        return rows.find(function (row) {
+            if (row.item_code !== data.item_code) {
+                return false;
+            }
+
+            if (
+                data.batch_no &&
+                row.batch_no !== data.batch_no
+            ) {
+                return false;
+            }
+
+            if (
+                data.default_warehouse &&
+                row.warehouse &&
+                row.warehouse !== data.default_warehouse
+            ) {
+                return false;
+            }
+
+            if (data.uom && row.uom !== data.uom) {
+                return false;
+            }
+
+            return true;
+        });
+    }
+
+    async function update_invoice_item(scanner, data) {
+        const frm = scanner.frm;
+
+        if (!frm || !frm.doc) {
+            throw new Error("Sales Invoice form is unavailable.");
+        }
+
+        const expected_row_before = find_scanned_row(frm, data);
+
+        console.log(
+            "StyleTone: before update_table:",
+            data
+        );
+
+        /*
+         * ERPNext may have an empty placeholder row.
+         * Determine whether the invoice has a real item before
+         * allowing the standard scanner to decide its update path.
+         */
+        const previous_has_items = frm.has_items;
+
+        const has_populated_items = (frm.doc.items || []).some(
+            function (row) {
+                return !!row.item_code;
+            }
+        );
+
+        try {
+            if (!has_populated_items) {
+                frm.has_items = false;
+            }
+
+            await scanner.update_table(data);
+        } finally {
+            frm.has_items = previous_has_items;
+        }
+
+        let row = find_scanned_row(frm, data);
+
+        /*
+         * Fallback only when the standard update did not create
+         * or update the expected item/batch row.
+         */
+        if (!row && typeof scanner.add_item_to_table === "function") {
+            console.warn(
+                "StyleTone: update_table did not produce the expected row; trying add_item_to_table."
+            );
+
+            await scanner.add_item_to_table(data);
+            row = find_scanned_row(frm, data);
+        }
+
+        /*
+         * Allow any synchronous model updates to settle, then
+         * verify once more before declaring success.
+         */
+        if (!row) {
+            row = find_scanned_row(frm, data);
+        }
+
+        console.log(
+            "StyleTone: after update; expected row:",
+            row
+        );
+
+        console.log(
+            "StyleTone: invoice items after update:",
+            (frm.doc.items || []).map(function (item) {
+                return {
+                    item_code: item.item_code,
+                    batch_no: item.batch_no,
+                    qty: item.qty,
+                    warehouse: item.warehouse
+                };
+            })
+        );
+
+        if (!row) {
+            throw new Error(
+                "ERPNext did not create the expected invoice row for item " +
+                data.item_code +
+                (data.batch_no ? ", batch " + data.batch_no : "") +
+                ". Check the console for update_table/add_item_to_table errors."
+            );
+        }
+
+        frm.refresh_field("items");
+
+        return row || expected_row_before;
+    }
+
     function install_custom_scan(scanner) {
         if (
             !scanner ||
@@ -574,7 +683,6 @@
             console.warn(
                 "StyleTone: scanner process_scan method not found."
             );
-
             return;
         }
 
@@ -596,7 +704,6 @@
                     message: __("Please finish the current scan first."),
                     indicator: "orange"
                 });
-
                 return;
             }
 
@@ -606,7 +713,6 @@
                 console.error(
                     "StyleTone: scanner barcode field was not found."
                 );
-
                 return;
             }
 
@@ -726,27 +832,29 @@
                     );
 
                     if (!selected_batch) {
+                        console.log(
+                            "StyleTone: batch selection cancelled."
+                        );
                         return;
                     }
 
                     data.batch_no = selected_batch.batch_no;
+
+                    console.log(
+                        "StyleTone: selected batch:",
+                        data.batch_no
+                    );
                 }
 
-                console.log(
-                    "StyleTone: before update_table:",
-                    data
-                );
-
-                const row = await me.update_table(data);
+                const row = await update_invoice_item(me, data);
 
                 console.log(
-                    "StyleTone: after update_table; returned row:",
-                    row
-                );
-
-                console.log(
-                    "StyleTone: invoice items after update:",
-                    frm.doc.items
+                    "StyleTone: item successfully processed:",
+                    {
+                        item_code: data.item_code,
+                        batch_no: data.batch_no || null,
+                        row_name: row && row.name
+                    }
                 );
 
                 play_success(me);
@@ -844,4 +952,8 @@
     });
 
     window[INSTALL_FLAG] = true;
+
+    console.log(
+        "StyleTone: Sales Invoice batch selector script loaded."
+    );
 })();
