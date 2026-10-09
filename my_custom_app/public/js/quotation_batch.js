@@ -1,27 +1,22 @@
-
 /* STYLETONE - ERPNext v16 Quotation Barcode / Batch Selector
  *
- * Standard scan_barcode field
- * Barcode -> Variant selection -> Batch selection -> Add item
+ * Flow:
+ * Barcode -> Variant -> Batch -> ERPNext item details -> Add row
  *
+ * Batch is passed to Python before item_code is written to the row.
  * Common warehouse: Quotation.custom_warehouse
- * Batch reference: Quotation Item.custom_batch_no
- * Does not intentionally change Sales Invoice or POSNext behavior.
+ * Batch field: Quotation Item.custom_batch_no
  */
 
 (() => {
     "use strict";
 
     const API = "my_custom_app.quotation_batch";
-    const PATCH_FLAG = "__styleToneQuotationBarcodePatchV3";
+    const PATCH_FLAG = "__styleToneQuotationBarcodePatchV4";
     const busyForms = new Set();
 
     function supported(frm) {
-        return Boolean(
-            frm &&
-            frm.doc &&
-            frm.doc.doctype === "Quotation"
-        );
+        return Boolean(frm && frm.doc && frm.doc.doctype === "Quotation");
     }
 
     function esc(value) {
@@ -42,7 +37,6 @@
         });
     }
 
-    // One common warehouse for every item in this Quotation.
     function get_warehouse(frm) {
         return String(frm.doc.custom_warehouse || "").trim();
     }
@@ -59,9 +53,7 @@
             }
 
             if (response.message === undefined) {
-                throw new Error(
-                    `No result returned by ${method}.`
-                );
+                throw new Error(`No result returned by ${method}.`);
             }
 
             return response.message;
@@ -72,12 +64,7 @@
         const dialog = new frappe.ui.Dialog({
             title,
             size: "large",
-            fields: [
-                {
-                    fieldname,
-                    fieldtype: "HTML"
-                }
-            ]
+            fields: [{ fieldname, fieldtype: "HTML" }]
         });
 
         dialog.fields_dict[fieldname].$wrapper.html(html);
@@ -186,6 +173,7 @@
             }).then((batches) => {
                 if (!Array.isArray(batches) || !batches.length) {
                     finish(null);
+
                     frappe.msgprint({
                         title: "No Available Batch",
                         indicator: "orange",
@@ -217,9 +205,7 @@
                     `Select Batch — ${item_code}`,
                     "batch_table",
                     `
-                        <p>
-                            <b>Warehouse:</b> ${esc(warehouse)}
-                        </p>
+                        <p><b>Warehouse:</b> ${esc(warehouse)}</p>
                         <div class="table-responsive">
                             <table class="table table-bordered table-hover">
                                 <thead>
@@ -279,9 +265,7 @@
         }
 
         if (item.has_variants && !item.variant_of) {
-            throw new Error(
-                `Select a concrete variant for ${item_code}.`
-            );
+            throw new Error(`Select a concrete variant for ${item_code}.`);
         }
 
         if (item.has_serial_no) {
@@ -294,13 +278,10 @@
             throw new Error(`A batch must be selected for ${item_code}.`);
         }
 
-        if (!frappe.meta.has_field(
-            "Quotation Item",
-            "custom_batch_no"
-        )) {
+        if (!frappe.meta.has_field("Quotation Item", "custom_batch_no")) {
             throw new Error(
                 "Quotation Item.custom_batch_no is missing. " +
-                "Create this Custom Field before scanning batch-tracked items."
+                "Create this Custom Field before scanning."
             );
         }
 
@@ -309,7 +290,7 @@
             "warehouse"
         );
 
-        // Reuse a row only when item, common warehouse and batch match.
+        // Same item + same batch: increase quantity, do not add a duplicate.
         const existing = (frm.doc.items || []).find((row) =>
             row.item_code === item_code &&
             (row.custom_batch_no || "") === (batch_no || "")
@@ -342,62 +323,104 @@
             return;
         }
 
-        // Reuse the existing empty row instead of creating a second row.
-const row = (frm.doc.items || []).find((child) => {
-    return !child.item_code && !child.custom_batch_no;
-}) || frm.add_child("items");
+        const doc = frm.doc;
+        const price_list = doc.selling_price_list || "";
 
-        try {
-            // Let ERPNext populate standard item details and pricing.
-            await frappe.model.set_value(
-                row.doctype,
-                row.name,
-                "item_code",
-                item_code
-            );
+        // Crucial: selected batch is sent BEFORE writing item_code to the row.
+        const item_args = {
+            doctype: "Quotation",
+            item_code,
+            batch_no: batch_no || "",
+            warehouse,
+            company: doc.company,
+            customer: doc.party_name || doc.customer || "",
+            quotation_to: doc.quotation_to || "Customer",
+            party_name: doc.party_name || doc.customer || "",
+            selling_price_list: price_list,
+            price_list: price_list,
+            price_list_currency: doc.price_list_currency || "",
+            currency: doc.currency || "",
+            conversion_rate: flt(doc.conversion_rate) || 1,
+            plc_conversion_rate: flt(doc.plc_conversion_rate) || 1,
+            transaction_date: doc.transaction_date || frappe.datetime.get_today(),
+            qty: 1,
+            uom: item.barcode_uom || item.stock_uom || "",
+            stock_uom: item.stock_uom || "",
+            project: doc.project || "",
+            ignore_pricing_rule: 0
+        };
 
-            const current = (frm.doc.items || []).find(
-                (child) => child.name === row.name
-            );
+        const response = await call("get_quotation_item_details", {
+            item_code,
+            batch_no: batch_no || "",
+            warehouse,
+            args: JSON.stringify(item_args),
+            doc: JSON.stringify(doc)
+        });
 
-            if (!current || current.item_code !== item_code) {
-                throw new Error(
-                    `ERPNext did not accept item ${item_code}.`
-                );
-            }
+        const details = response?.details || response;
 
-            if (has_row_warehouse && warehouse) {
-                await frappe.model.set_value(
-                    current.doctype,
-                    current.name,
-                    "warehouse",
-                    warehouse
-                );
-            }
-
-            await frappe.model.set_value(
-                current.doctype,
-                current.name,
-                "custom_batch_no",
-                batch_no || ""
-            );
-
-            frm.refresh_field("items");
-
-            frappe.show_alert({
-                message:
-                    `Added ${item_code}` +
-                    (batch_no ? ` — Batch ${batch_no}` : ""),
-                indicator: "green"
-            });
-        } catch (error) {
-            frm.doc.items = (frm.doc.items || []).filter(
-                (child) => child.name !== row.name
-            );
-
-            frm.refresh_field("items");
-            throw error;
+        if (!details || typeof details !== "object") {
+            throw new Error("ERPNext returned no item details.");
         }
+
+        // Reuse the empty first row when possible.
+        const row = (frm.doc.items || []).find((child) =>
+            !child.item_code && !child.custom_batch_no
+        ) || frm.add_child("items");
+
+        const row_name = row.name;
+        const meta = frappe.get_meta("Quotation Item");
+        const allowed_fields = new Set(
+            (meta.fields || []).map((field) => field.fieldname)
+        );
+
+        // Apply the returned standard item details without triggering
+        // the item_code handler and causing another price fetch.
+        for (const [fieldname, value] of Object.entries(details)) {
+            if (
+                !allowed_fields.has(fieldname) ||
+                [
+                    "item_code",
+                    "name",
+                    "doctype",
+                    "parent",
+                    "parenttype",
+                    "parentfield",
+                    "idx",
+                    "batch_no",
+                    "custom_batch_no"
+                ].includes(fieldname)
+            ) {
+                continue;
+            }
+
+            row[fieldname] = value;
+        }
+
+        // Assign these only after the batch-aware request has completed.
+        row.item_code = item_code;
+        row.qty = 1;
+        row.custom_batch_no = batch_no || "";
+
+        if (has_row_warehouse && warehouse) {
+            row.warehouse = warehouse;
+        }
+
+        // Ensure the row still exists and refresh the grid.
+        if (!(frm.doc.items || []).some((child) => child.name === row_name)) {
+            throw new Error("The Quotation item row was unexpectedly removed.");
+        }
+
+        frm.refresh_field("items");
+        frm.dirty();
+
+        frappe.show_alert({
+            message:
+                `Added ${item_code}` +
+                (batch_no ? ` — Batch ${batch_no}` : ""),
+            indicator: "green"
+        });
     }
 
     async function process_barcode(frm, raw_barcode) {
@@ -419,14 +442,12 @@ const row = (frm.doc.items || []).find((child) => {
         busyForms.add(form_key);
 
         try {
-            // Resolve barcode first.
             const lookup = await call("scan_barcode_with_variants", {
                 search_value: barcode
             });
 
             let selected = lookup;
 
-            // Select a concrete variant when the barcode resolves to a template.
             if (lookup.has_variants) {
                 selected = await select_variant(lookup.variants);
                 if (!selected) return;
@@ -443,9 +464,7 @@ const row = (frm.doc.items || []).find((child) => {
             }
 
             if (selected.has_variants && !selected.variant_of) {
-                throw new Error(
-                    `Select a concrete variant for ${item_code}.`
-                );
+                throw new Error(`Select a concrete variant for ${item_code}.`);
             }
 
             if (selected.has_serial_no) {
@@ -454,7 +473,6 @@ const row = (frm.doc.items || []).find((child) => {
                 );
             }
 
-            // Always use the Quotation's common custom_warehouse.
             const warehouse = get_warehouse(frm);
 
             if (!warehouse) {
@@ -464,7 +482,6 @@ const row = (frm.doc.items || []).find((child) => {
                 );
             }
 
-            // Select a batch only for batch-tracked items.
             let batch_no = "";
 
             if (selected.has_batch_no) {
@@ -472,7 +489,6 @@ const row = (frm.doc.items || []).find((child) => {
                 if (!batch_no) return;
             }
 
-            // Add the item after all required selections.
             await add_item(
                 frm,
                 {
@@ -508,14 +524,13 @@ const row = (frm.doc.items || []).find((child) => {
         proto.process_scan = function (...args) {
             const frm = this.frm;
 
-            // All non-Quotation documents use ERPNext's original scanner.
+            // Leave all non-Quotation documents on ERPNext's original scanner.
             if (!supported(frm)) {
                 return original.apply(this, args);
             }
 
             const field = this.scan_barcode_field;
 
-            // Read only the standard scan_barcode field.
             const barcode = String(
                 frm.doc.scan_barcode ||
                 field?.get_value?.() ||
@@ -553,7 +568,7 @@ const row = (frm.doc.items || []).find((child) => {
 
         console.info(
             "StyleTone: Quotation barcode scanner connected. " +
-            "Warehouse source: custom_warehouse."
+            "Batch is passed before item details are fetched."
         );
 
         return true;
