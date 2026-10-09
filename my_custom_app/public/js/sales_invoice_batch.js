@@ -1,3 +1,4 @@
+
 /*
  * StyleTone - Sales Invoice Barcode + Batch Selector
  * ERPNext v16 / Frappe v16
