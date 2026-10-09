@@ -342,7 +342,10 @@
             return;
         }
 
-        const row = frm.add_child("items");
+        // Reuse the existing empty row instead of creating a second row.
+const row = (frm.doc.items || []).find((child) => {
+    return !child.item_code && !child.custom_batch_no;
+}) || frm.add_child("items");
 
         try {
             // Let ERPNext populate standard item details and pricing.
