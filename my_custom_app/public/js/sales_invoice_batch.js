@@ -307,39 +307,35 @@
     // CHECK WHETHER BATCH DIALOG IS REQUIRED
     // ============================================================
 
-    
+  
 function check_batch_required(frm, item) {
     if (!frm || !item || !item.item_code) {
         return false;
     }
 
-    // Standard ERPNext Sales Invoice only
-    if (frm.doc.doctype !== "Sales Invoice") {
+    if (frm.doc.doctype !== "Sales Invoice" || frm.doc.is_pos) {
         return false;
     }
 
-    // Do not modify POS
-    if (frm.doc.is_pos) {
+    if (item.batch_no || item.has_serial_no) {
         return false;
     }
 
-    // Only items that require batches
-    if (!item.has_batch_no) {
-        return false;
-    }
-
-    // Leave serial-number-only items to ERPNext
-    if (item.has_serial_no && !item.has_batch_no) {
-        return false;
-    }
-
-    // Skip rows where a batch is already selected
-    if (item.batch_no) {
-        return false;
-    }
-
-    return true;
+    // Check the Item master, not only the invoice row.
+    return frappe.db.get_value(
+        "Item",
+        item.item_code,
+        "has_batch_no"
+    ).then(function (r) {
+        return !!(
+            r &&
+            r.message &&
+            r.message.has_batch_no
+        );
+    });
 }
+
+  
 
 
     // ============================================================
