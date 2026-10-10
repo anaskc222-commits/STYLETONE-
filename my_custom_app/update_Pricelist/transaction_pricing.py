@@ -15,6 +15,7 @@ MINIMUM_MARGIN_PERCENT = {
 }
 
 SPECIAL_ZERO_MARGIN_CODE = 999.0
+
 TARGET_PRICE_LISTS = set(MINIMUM_MARGIN_PERCENT)
 
 
@@ -24,15 +25,27 @@ TARGET_PRICE_LISTS = set(MINIMUM_MARGIN_PERCENT)
 
 def validate_discount_limit(doc, method=None):
     """
-    Validate discounts against Standard Buying.
+    Validate discounts for Quotation and Sales Invoice.
 
-    Code 999 bypasses minimum-margin limits without changing the rate.
-    A valid Standard Buying price is still required for code 999.
+    Batch fields:
+      Quotation     -> custom_batch_no
+      Sales Invoice -> batch_no
+
+    Rules:
+      - Only configured target selling price lists are validated.
+      - POS transactions are skipped.
+      - Standard Buying price must be positive.
+      - A selected batch must match its batch-specific buying price
+        or an applicable item-level price with blank batch.
+      - A different nonblank batch price is never used as a fallback.
+      - Code 999 bypasses minimum-margin checks but still requires
+        a valid Standard Buying price.
+      - This function never changes selling rates or discounts.
     """
 
-    # Skip POS and POS-profile transactions.
+    # Skip POS transactions and POS-profile transactions.
     if (
-        getattr(doc, "is_pos", 0)
+        flt(doc.get("is_pos"))
         or doc.get("pos_profile")
         or doc.get("pos_opening_shift")
     ):
@@ -45,8 +58,10 @@ def validate_discount_limit(doc, method=None):
 
     minimum_margin = MINIMUM_MARGIN_PERCENT[selling_price_list]
 
+    # Only fetch buying prices for rows requiring validation.
     rows = [
-        row for row in (doc.get("items") or [])
+        row
+        for row in (doc.get("items") or [])
         if row.get("item_code")
         and (
             flt(row.get("discount_percentage")) > 0
@@ -57,7 +72,12 @@ def validate_discount_limit(doc, method=None):
     if not rows:
         return
 
-    effective_date = getdate(doc.get("posting_date") or nowdate())
+    # Quotation uses transaction_date; Sales Invoice uses posting_date.
+    effective_date = getdate(
+        doc.get("posting_date")
+        or doc.get("transaction_date")
+        or nowdate()
+    )
 
     buying_prices, diagnostics = get_buying_prices_for_document(
         rows,
@@ -76,10 +96,7 @@ def validate_discount_limit(doc, method=None):
         key = make_price_key(row)
         buying_rate = flt(buying_prices.get(key))
 
-        # --------------------------------------------------------------
-        # SPECIAL CODE 999: BYPASS MARGIN LIMIT
-        # --------------------------------------------------------------
-
+        # Special code 999: require a valid cost, but skip margin checks.
         if custom_code == SPECIAL_ZERO_MARGIN_CODE:
             if buying_rate <= 0:
                 problems.append({
@@ -88,16 +105,14 @@ def validate_discount_limit(doc, method=None):
                     "discount": discount,
                     "reason": (
                         "Code 999 requires a valid Standard Buying price. "
-                        + diagnostics.get(key, "")
+                        + diagnostics.get(
+                            key,
+                            "No matching Standard Buying price was found."
+                        )
                     ),
                 })
 
-            # Do not change selling rate or discount.
             continue
-
-        # --------------------------------------------------------------
-        # NORMAL DISCOUNT VALIDATION
-        # --------------------------------------------------------------
 
         if discount <= 0:
             continue
@@ -107,7 +122,7 @@ def validate_discount_limit(doc, method=None):
                 "item_code": item_code,
                 "selling_rate": selling_rate,
                 "discount": discount,
-                "reason": "Selling rate is missing or zero",
+                "reason": "Selling rate is missing or zero.",
             })
             continue
 
@@ -118,7 +133,10 @@ def validate_discount_limit(doc, method=None):
                 "discount": discount,
                 "reason": (
                     "Standard Buying price not found. "
-                    + diagnostics.get(key, "")
+                    + diagnostics.get(
+                        key,
+                        "No matching Standard Buying price was found."
+                    )
                 ),
             })
             continue
@@ -128,14 +146,16 @@ def validate_discount_limit(doc, method=None):
                 "item_code": item_code,
                 "selling_rate": selling_rate,
                 "discount": discount,
-                "reason": "Price List Rate is missing or zero",
+                "reason": "Price List Rate is missing or zero.",
             })
             continue
 
+        # Minimum selling price required to preserve the target margin.
         minimum_selling_rate = buying_rate * (
             1.0 + minimum_margin / 100.0
         )
 
+        # Maximum discount allowed against the price list rate.
         maximum_discount = max(
             0.0,
             (
@@ -153,7 +173,7 @@ def validate_discount_limit(doc, method=None):
                     f"Maximum allowed discount is "
                     f"{maximum_discount:.2f}%. "
                     f"Buying price: {buying_rate:.2f}; "
-                    f"minimum margin: {minimum_margin:.2f}%"
+                    f"minimum margin: {minimum_margin:.2f}%."
                 ),
             })
 
@@ -166,20 +186,43 @@ def validate_discount_limit(doc, method=None):
 
 
 # ----------------------------------------------------------------------
+# BATCH FIELD COMPATIBILITY
+# ----------------------------------------------------------------------
+
+def get_row_batch_no(row):
+    """
+    Get the selected batch for either supported document.
+
+    Sales Invoice: batch_no
+    Quotation:     custom_batch_no
+    """
+
+    return (
+        row.get("batch_no")
+        or row.get("custom_batch_no")
+        or ""
+    )
+
+
+# ----------------------------------------------------------------------
 # BULK STANDARD BUYING PRICE LOOKUP
 # ----------------------------------------------------------------------
 
 def get_buying_prices_for_document(items, effective_date=None):
     """
-    Fetch applicable Item Price records in one SQL query.
+    Fetch applicable Standard Buying Item Price records using one SQL
+    query for all relevant item codes.
 
-    Match priority:
+    Matching priority:
       1. Exact batch + exact UOM
       2. Exact batch + blank UOM
       3. Blank batch + exact UOM
       4. Blank batch + blank UOM
 
-    Only positive prices valid on the document date are considered.
+    A nonblank batch-specific price is not used for a different batch.
+    If the document row has no batch, only blank-batch prices match.
+
+    Only positive prices valid on the effective document date qualify.
     """
 
     item_codes = list({
@@ -192,6 +235,7 @@ def get_buying_prices_for_document(items, effective_date=None):
         return {}, {}
 
     effective_date = getdate(effective_date or nowdate())
+
     placeholders = ", ".join(["%s"] * len(item_codes))
 
     query = f"""
@@ -222,7 +266,8 @@ def get_buying_prices_for_document(items, effective_date=None):
         as_dict=True,
     )
 
-    # Keep the newest record for each item/batch/UOM combination.
+    # Index format must match make_price_key():
+    # (item_code, batch_no, uom)
     price_index = {}
 
     for price in price_rows:
@@ -232,6 +277,8 @@ def get_buying_prices_for_document(items, effective_date=None):
             price.get("uom") or "",
         )
 
+        # Query is newest first; retain the newest applicable record
+        # for each exact item/batch/UOM combination.
         price_index.setdefault(
             index_key,
             flt(price.get("price_list_rate")),
@@ -247,7 +294,7 @@ def get_buying_prices_for_document(items, effective_date=None):
             continue
 
         row_uom = row.get("uom") or ""
-        row_batch = row.get("batch_no") or ""
+        row_batch = get_row_batch_no(row)
         row_key = make_price_key(row)
 
         priorities = (
@@ -270,7 +317,8 @@ def get_buying_prices_for_document(items, effective_date=None):
             result[row_key] = selected_rate
             continue
 
-        # Build diagnostics only when no matching price is found.
+        # Diagnostic only: show available prices without applying an
+        # unrelated batch-specific price.
         item_candidates = [
             (batch, uom, rate)
             for (code, batch, uom), rate in price_index.items()
@@ -294,23 +342,26 @@ def get_buying_prices_for_document(items, effective_date=None):
 
             diagnostics[row_key] = (
                 f"No matching UOM/batch price for item {item_code}. "
-                f"Invoice UOM={row_uom or '(blank)'}, "
+                f"Document UOM={row_uom or '(blank)'}, "
                 f"batch={row_batch or '(blank)'}. "
-                f"Available: {'; '.join(available)}"
+                f"Available prices: {'; '.join(available)}"
             )
 
     return result, diagnostics
 
 
 # ----------------------------------------------------------------------
-# INVOICE ROW KEY
+# INVOICE / QUOTATION ROW KEY
 # ----------------------------------------------------------------------
 
 def make_price_key(row):
-    # Must match price_index and candidate_key tuple order.
+    """
+    Use one consistent key for Quotation and Sales Invoice rows.
+    """
+
     return (
         row.get("item_code") or "",
-        row.get("batch_no") or "",
+        get_row_batch_no(row),
         row.get("uom") or "",
     )
 
