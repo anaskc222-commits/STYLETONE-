@@ -1,4 +1,3 @@
-
 import frappe
 from frappe import _
 from frappe.utils import cint, flt, today
@@ -313,8 +312,12 @@ def get_available_batches(item_code, warehouse):
 #
 # Item Price field: batch_no
 # Quotation Item field: custom_batch_no
+#
+# Priority:
+#   1. Exact batch + item + price list
+#   2. Blank-batch item price
+#   3. found=False and rate 0
 # ============================================================
-
 
 @frappe.whitelist()
 def get_batch_item_price(
@@ -333,78 +336,106 @@ def get_batch_item_price(
     transaction_date = transaction_date or today()
 
     if not item_code or not price_list:
-        return {"found": False}
+        return {
+            "found": False,
+            "match_type": "not_found",
+            "price_list_rate": 0,
+        }
 
     meta = frappe.get_meta("Item Price")
 
     if not meta.has_field("batch_no"):
-        return {"found": False}
+        frappe.log_error(
+            "Item Price has no batch_no field.",
+            "STYLETONE Batch Price Lookup",
+        )
+        return {
+            "found": False,
+            "match_type": "batch_field_missing",
+            "price_list_rate": 0,
+        }
 
-    def find_price(search_batch):
+    def find_price(exact_batch):
         conditions = [
-            "item_code = %(item_code)s",
-            "price_list = %(price_list)s",
-            "(batch_no = %(batch_no)s OR "
-            "(%(batch_no)s = '' AND "
-            "(batch_no IS NULL OR batch_no = '')))",
+            "`item_code` = %(item_code)s",
+            "`price_list` = %(price_list)s",
         ]
 
         values = {
             "item_code": item_code,
             "price_list": price_list,
-            "batch_no": search_batch or "",
             "date": transaction_date,
         }
 
+        if exact_batch:
+            conditions.append("`batch_no` = %(batch_no)s")
+            values["batch_no"] = batch_no
+        else:
+            conditions.append(
+                "(`batch_no` IS NULL OR `batch_no` = '')"
+            )
+
         if meta.has_field("valid_from"):
             conditions.append(
-                "(valid_from IS NULL OR valid_from <= %(date)s)"
+                "(`valid_from` IS NULL OR `valid_from` <= %(date)s)"
             )
 
         if meta.has_field("valid_upto"):
             conditions.append(
-                "(valid_upto IS NULL OR valid_upto >= %(date)s)"
+                "(`valid_upto` IS NULL OR `valid_upto` >= %(date)s)"
             )
 
+        # Prefer customer-specific pricing, but allow general pricing.
         if meta.has_field("customer") and customer:
             conditions.append(
-                "(customer = %(customer)s OR "
-                "customer IS NULL OR customer = '')"
+                "(`customer` = %(customer)s OR "
+                "`customer` IS NULL OR `customer` = '')"
             )
             values["customer"] = customer
 
+        # Prefer the requested UOM, but allow general UOM pricing.
         if meta.has_field("uom") and uom:
             conditions.append(
-                "(uom = %(uom)s OR uom IS NULL OR uom = '')"
+                "(`uom` = %(uom)s OR "
+                "`uom` IS NULL OR `uom` = '')"
             )
             values["uom"] = uom
 
-        fields = ["name", "price_list_rate", "batch_no"]
         order = []
 
         if meta.has_field("customer") and customer:
-            order.append("(customer = %(customer)s) DESC")
+            order.append(
+                "(`customer` = %(customer)s) DESC"
+            )
 
         if meta.has_field("uom") and uom:
-            order.append("(uom = %(uom)s) DESC")
+            order.append(
+                "(`uom` = %(uom)s) DESC"
+            )
 
         if meta.has_field("valid_from"):
-            order.append("valid_from DESC")
+            order.append("`valid_from` DESC")
 
         if meta.has_field("modified"):
-            order.append("modified DESC")
+            order.append("`modified` DESC")
+
+        order_by = ", ".join(order) or "`name` DESC"
 
         rows = frappe.db.sql(
             """
-            SELECT {fields}
+            SELECT
+                `name`,
+                `item_code`,
+                `batch_no`,
+                `price_list`,
+                `price_list_rate`
             FROM `tabItem Price`
             WHERE {conditions}
-            ORDER BY {order}
+            ORDER BY {order_by}
             LIMIT 1
             """.format(
-                fields=", ".join("`{}`".format(f) for f in fields),
                 conditions=" AND ".join(conditions),
-                order=", ".join(order) or "name DESC",
+                order_by=order_by,
             ),
             values,
             as_dict=True,
@@ -412,44 +443,57 @@ def get_batch_item_price(
 
         return rows[0] if rows else None
 
-    # Batch item: exact batch price first.
+    # 1. Always attempt exact batch match first.
     if batch_no:
-        row = find_price(batch_no)
+        row = find_price(exact_batch=True)
 
         if row:
-            return {
+            result = {
                 "found": True,
                 "match_type": "exact_batch",
                 "item_price": row.name,
-                "price_list_rate": flt(row.price_list_rate),
+                "item_code": row.item_code,
                 "batch_no": row.batch_no,
+                "price_list": row.price_list,
+                "price_list_rate": flt(row.price_list_rate),
             }
 
-    # Fallback: blank-batch Item Price.
-    row = find_price("")
+            frappe.logger("styleTone_batch_price").info(
+                frappe.as_json(result)
+            )
+
+            return result
+
+    # 2. Fallback to the ordinary Item Price only when no exact
+    # batch-specific Item Price was found.
+    row = find_price(exact_batch=False)
 
     if row:
-        return {
+        result = {
             "found": True,
             "match_type": "blank_batch",
             "item_price": row.name,
-            "price_list_rate": flt(row.price_list_rate),
+            "item_code": row.item_code,
             "batch_no": row.batch_no,
+            "price_list": row.price_list,
+            "price_list_rate": flt(row.price_list_rate),
         }
 
-    return {"found": False, "price_list_rate": 0}
+        frappe.logger("styleTone_batch_price").info(
+            frappe.as_json(result)
+        )
 
+        return result
+
+    return {
+        "found": False,
+        "match_type": "not_found",
+        "price_list_rate": 0,
+    }
 
 
 # ============================================================
 # PUBLIC API: BARCODE AND VARIANT LOOKUP
-#
-# Response contract expected by quotation_batch.js:
-# Template:
-#   {"found": True, "is_template": True, "variants": [...]}
-#
-# Normal item:
-#   {"found": True, "is_template": False, "item": {...}}
 # ============================================================
 
 @frappe.whitelist()
@@ -495,7 +539,7 @@ def scan_barcode_with_variants(barcode, warehouse=None):
             "message": _("Item is disabled or unavailable."),
         }
 
-    # A template must be resolved to a real sellable variant.
+    # A template must be resolved to a concrete variant.
     if cint(item.has_variants):
         variant_rows = frappe.get_all(
             "Item",
@@ -525,7 +569,6 @@ def scan_barcode_with_variants(barcode, warehouse=None):
             if info.get("unsupported_serial_batch"):
                 continue
 
-            # Keep only variants with positive available stock.
             if flt(info.get("available_qty")) <= 0:
                 continue
 
@@ -552,7 +595,7 @@ def scan_barcode_with_variants(barcode, warehouse=None):
             "variants": variants,
         }
 
-    # Handle a barcode assigned directly to a normal item or variant.
+    # Direct barcode: normal item or concrete variant.
     if not cint(item.is_stock_item):
         return {
             "found": False,
@@ -566,9 +609,7 @@ def scan_barcode_with_variants(barcode, warehouse=None):
     if not info:
         return {
             "found": False,
-            "message": _(
-                "Item is disabled or unavailable."
-            ),
+            "message": _("Item is disabled or unavailable."),
         }
 
     if info.get("unsupported_serial_batch"):
