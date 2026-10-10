@@ -1,15 +1,16 @@
 
 import frappe
 from frappe import _
-from frappe.utils import flt, getdate
+from frappe.utils import flt
 
 
 # ============================================================
-# ITEM / BARCODE HELPERS
+# BARCODE LOOKUP
 # ============================================================
 
 def _get_item_by_barcode(barcode):
     barcode = (barcode or "").strip()
+
     if not barcode:
         return None
 
@@ -19,6 +20,7 @@ def _get_item_by_barcode(barcode):
         fields=["parent"],
         limit=1,
     )
+
     if rows:
         return rows[0].parent
 
@@ -28,8 +30,52 @@ def _get_item_by_barcode(barcode):
     return None
 
 
+# ============================================================
+# ITEM INFORMATION
+# ============================================================
+
+def _get_item_info(item_code):
+    item = frappe.db.get_value(
+        "Item",
+        item_code,
+        [
+            "name",
+            "item_name",
+            "stock_uom",
+            "has_batch_no",
+            "has_serial_no",
+            "has_variants",
+            "variant_of",
+            "disabled",
+            "is_stock_item",
+        ],
+        as_dict=True,
+    )
+
+    if not item or item.disabled:
+        return None
+
+    return {
+        "item_code": item.name,
+        "item_name": item.item_name,
+        "stock_uom": item.stock_uom,
+        "has_batch_no": bool(item.has_batch_no),
+        "has_serial_no": bool(item.has_serial_no),
+        "has_variants": bool(item.has_variants),
+        "variant_of": item.variant_of,
+        "is_stock_item": bool(item.is_stock_item),
+    }
+
+
+# ============================================================
+# AVAILABLE BATCHES
+# Uses ERPNext's batch stock API.
+# ============================================================
+
 def _get_batch_qty_rows(item_code, warehouse):
-    """Return positive available quantities using ERPNext's batch stock API."""
+    if not item_code or not warehouse:
+        return []
+
     from erpnext.stock.doctype.batch.batch import get_batch_qty
 
     try:
@@ -46,12 +92,25 @@ def _get_batch_qty_rows(item_code, warehouse):
     rows = []
 
     if isinstance(result, dict):
-        # Some versions return a mapping of batch number to quantity.
-        for batch_no, qty in result.items():
-            if isinstance(qty, dict):
-                batch_no = qty.get("batch_no") or batch_no
-                qty = qty.get("qty", qty.get("actual_qty", 0))
-            rows.append({"batch_no": batch_no, "qty": flt(qty)})
+        for batch_no, value in result.items():
+            if isinstance(value, dict):
+                batch_no = (
+                    value.get("batch_no")
+                    or value.get("name")
+                    or batch_no
+                )
+                qty = value.get(
+                    "qty",
+                    value.get("actual_qty", value.get("batch_qty", 0)),
+                )
+            else:
+                qty = value
+
+            if batch_no:
+                rows.append({
+                    "batch_no": batch_no,
+                    "qty": flt(qty),
+                })
 
     elif isinstance(result, (list, tuple)):
         for entry in result:
@@ -67,112 +126,48 @@ def _get_batch_qty_rows(item_code, warehouse):
                 continue
 
             if batch_no:
-                rows.append({"batch_no": batch_no, "qty": flt(qty)})
+                rows.append({
+                    "batch_no": batch_no,
+                    "qty": flt(qty),
+                })
 
     output = []
-    for row in rows:
-        batch_no = row.get("batch_no")
-        qty = flt(row.get("qty"))
 
-        if not batch_no or qty <= 0:
+    for row in rows:
+        batch_no = row["batch_no"]
+        qty = flt(row["qty"])
+
+        if qty <= 0:
             continue
 
-        expiry_date = frappe.db.get_value(
-            "Batch", batch_no, "expiry_date"
+        batch = frappe.db.get_value(
+            "Batch",
+            batch_no,
+            ["expiry_date", "disabled", "item"],
+            as_dict=True,
         )
+
+        if not batch or batch.disabled:
+            continue
+
+        if batch.item != item_code:
+            continue
 
         output.append({
             "batch_no": batch_no,
-            "expiry_date": expiry_date,
+            "expiry_date": batch.expiry_date,
             "qty": qty,
         })
 
     output.sort(
         key=lambda row: (
-            row.get("expiry_date") is None,
-            row.get("expiry_date") or "9999-12-31",
+            row["expiry_date"] is None,
+            str(row["expiry_date"] or "9999-12-31"),
             row["batch_no"],
         )
     )
+
     return output
-
-
-def _get_non_batch_available_qty(item_code, warehouse):
-    if not warehouse:
-        return 0
-
-    bin_row = frappe.db.get_value(
-        "Bin",
-        {"item_code": item_code, "warehouse": warehouse},
-        ["actual_qty", "reserved_qty"],
-        as_dict=True,
-    )
-
-    if not bin_row:
-        return 0
-
-    return max(
-        0,
-        flt(bin_row.actual_qty) - flt(bin_row.reserved_qty),
-    )
-
-
-def _get_item_stock_info(item_code, warehouse):
-    item = frappe.db.get_value(
-        "Item",
-        item_code,
-        [
-            "item_name",
-            "has_batch_no",
-            "has_serial_no",
-            "has_variants",
-            "disabled",
-            "is_stock_item",
-        ],
-        as_dict=True,
-    )
-
-    if not item or item.disabled:
-        return None
-
-    if not item.is_stock_item:
-        return {
-            "item_code": item_code,
-            "item_name": item.item_name,
-            "has_batch_no": bool(item.has_batch_no),
-            "available_qty": 0,
-            "batches": [],
-        }
-
-    # Serial + batch tracking needs a separate serial/batch selection flow.
-    if item.has_batch_no and item.has_serial_no:
-        return {
-            "item_code": item_code,
-            "item_name": item.item_name,
-            "has_batch_no": True,
-            "unsupported_serial_batch": True,
-            "available_qty": 0,
-            "batches": [],
-        }
-
-    if item.has_batch_no:
-        batches = _get_batch_qty_rows(item_code, warehouse)
-        return {
-            "item_code": item_code,
-            "item_name": item.item_name,
-            "has_batch_no": True,
-            "available_qty": sum(flt(b["qty"]) for b in batches),
-            "batches": batches,
-        }
-
-    qty = _get_non_batch_available_qty(item_code, warehouse)
-    return {
-        "item_code": item_code,
-        "item_name": item.item_name,
-        "has_batch_no": False,
-        "available_qty": qty,
-        "batches": [],
-    }
 
 
 # ============================================================
@@ -181,54 +176,70 @@ def _get_item_stock_info(item_code, warehouse):
 
 @frappe.whitelist()
 def scan_barcode_with_variants(barcode, warehouse=None):
-    """Resolve a barcode and return its item or available template variants."""
+    barcode = (barcode or "").strip()
+
     if not barcode:
-        frappe.throw(_("Please scan a barcode."))
+        return {
+            "found": False,
+            "message": _("Please scan a barcode."),
+        }
 
     item_code = _get_item_by_barcode(barcode)
+
     if not item_code:
-        return {"found": False, "message": _("Barcode not found.")}
+        return {
+            "found": False,
+            "message": _("Barcode not found."),
+        }
 
-    item = frappe.db.get_value(
-        "Item",
-        item_code,
-        ["has_variants", "disabled"],
-        as_dict=True,
-    )
+    info = _get_item_info(item_code)
 
-    if not item or item.disabled:
-        return {"found": False, "message": _("Item is disabled or unavailable.")}
+    if not info:
+        return {
+            "found": False,
+            "message": _("Item is disabled or unavailable."),
+        }
 
-    # If the scanned item is a template, present its variants.
-    variants = frappe.get_all(
-        "Item",
-        filters={
-            "variant_of": item_code,
-            "disabled": 0,
-        },
-        fields=["name", "item_name"],
-        order_by="item_name asc",
-    )
-
-    if variants:
-        variant_rows = []
-        for variant in variants:
-            info = _get_item_stock_info(variant.name, warehouse)
-            if info:
-                variant_rows.append(info)
+    # Item template: return concrete variants for selection.
+    if info["has_variants"] and not info["variant_of"]:
+        variants = frappe.get_all(
+            "Item",
+            filters={
+                "variant_of": item_code,
+                "disabled": 0,
+            },
+            fields=[
+                "name",
+                "item_name",
+                "stock_uom",
+                "has_batch_no",
+                "has_serial_no",
+            ],
+            order_by="item_name asc",
+        )
 
         return {
             "found": True,
-            "is_template": True,
+            "has_variants": True,
             "item_code": item_code,
-            "variants": variant_rows,
+            "item_name": info["item_name"],
+            "variants": [
+                {
+                    "item_code": row.name,
+                    "item_name": row.item_name,
+                    "stock_uom": row.stock_uom,
+                    "has_batch_no": bool(row.has_batch_no),
+                    "has_serial_no": bool(row.has_serial_no),
+                }
+                for row in variants
+            ],
         }
 
-    info = _get_item_stock_info(item_code, warehouse)
-    if not info:
-        return {"found": False, "message": _("Item is unavailable.")}
-
-    return {"found": True, "is_template": False, "item": info}
+    return {
+        "found": True,
+        "has_variants": False,
+        "item": info,
+    }
 
 
 # ============================================================
@@ -240,120 +251,13 @@ def get_available_batches(item_code, warehouse):
     if not item_code or not warehouse:
         return []
 
-    if not frappe.db.exists("Item", item_code):
+    info = _get_item_info(item_code)
+
+    if not info or not info["has_batch_no"]:
         return []
 
-    item = frappe.db.get_value(
-        "Item",
-        item_code,
-        ["has_batch_no", "has_serial_no", "disabled"],
-        as_dict=True,
-    )
-
-    if not item or item.disabled or not item.has_batch_no:
-        return []
-
-    if item.has_serial_no:
+    # Serial + batch items need a separate serial selection workflow.
+    if info["has_serial_no"]:
         return []
 
     return _get_batch_qty_rows(item_code, warehouse)
-
-
-# ============================================================
-# WHITELISTED BATCH-SPECIFIC ITEM PRICE LOOKUP
-# Item Price.batch_no -> Quotation Item.custom_batch_no
-# ============================================================
-
-@frappe.whitelist()
-def get_batch_item_price(
-    item_code,
-    batch_no,
-    price_list,
-    transaction_date=None,
-    customer=None,
-    uom=None,
-):
-    """Find the Item Price matching the exact selected batch."""
-    if not item_code or not batch_no or not price_list:
-        return {"found": False, "reason": "missing_required_value"}
-
-    meta = frappe.get_meta("Item Price")
-
-    if not meta.has_field("batch_no"):
-        frappe.log_error(
-            "Item Price has no batch_no field.",
-            "Quotation Batch Price Lookup",
-        )
-        return {"found": False, "reason": "missing_batch_no_field"}
-
-    conditions = [
-        "item_code = %(item_code)s",
-        "price_list = %(price_list)s",
-        "batch_no = %(batch_no)s",
-    ]
-
-    values = {
-        "item_code": item_code,
-        "price_list": price_list,
-        "batch_no": batch_no,
-    }
-
-    date_value = getdate(transaction_date) if transaction_date else getdate()
-
-    if meta.has_field("valid_from"):
-        conditions.append(
-            "(valid_from IS NULL OR valid_from <= %(transaction_date)s)"
-        )
-        values["transaction_date"] = date_value
-
-    if meta.has_field("valid_upto"):
-        conditions.append(
-            "(valid_upto IS NULL OR valid_upto >= %(transaction_date)s)"
-        )
-        values["transaction_date"] = date_value
-
-    if meta.has_field("customer") and customer:
-        conditions.append(
-            "(customer = %(customer)s OR customer IS NULL OR customer = '')"
-        )
-        values["customer"] = customer
-
-    if meta.has_field("uom") and uom:
-        conditions.append(
-            "(uom = %(uom)s OR uom IS NULL OR uom = '')"
-        )
-        values["uom"] = uom
-
-    order_by = []
-    if meta.has_field("customer") and customer:
-        order_by.append(
-            "CASE WHEN customer = %(customer)s THEN 0 ELSE 1 END"
-        )
-    if meta.has_field("uom") and uom:
-        order_by.append(
-            "CASE WHEN uom = %(uom)s THEN 0 ELSE 1 END"
-        )
-    order_by.append("modified DESC")
-
-    query = """
-        SELECT name, price_list_rate
-        FROM `tabItem Price`
-        WHERE {conditions}
-        ORDER BY {order_by}
-        LIMIT 1
-    """.format(
-        conditions=" AND ".join(conditions),
-        order_by=", ".join(order_by),
-    )
-
-    rows = frappe.db.sql(query, values, as_dict=True)
-
-    if not rows:
-        return {"found": False, "reason": "no_exact_batch_price"}
-
-    return {
-        "found": True,
-        "item_price": rows[0].name,
-        "rate": flt(rows[0].price_list_rate),
-        "batch_no": batch_no,
-    }
