@@ -1,19 +1,17 @@
 /* STYLETONE - ERPNext v16 Quotation Barcode / Batch / Price
 *
 
-* Barcode -> variant selection (if template)
-*      -> batch selection (if batch-tracked)
-*      -> ERPNext standard item details
-*      -> exact batch Item Price
-*      -> blank-batch Item Price fallback
-*      -> zero if no matching Item Price exists
-*      -> add/update Quotation Item
+* Barcode -> variant selection -> batch selection
+* -> ERPNext item details -> batch-specific price lookup
+* -> add/update Quotation Item
 * 
 * Quotation Item batch field: custom_batch_no
 * Item Price batch field:     batch_no
 * 
-* No ERPNext core changes.
-* Quotation only; does not handle Sales Invoice or POS Next.
+* Exact batch price -> blank-batch price -> zero
+* Non-batch item -> blank-batch price -> zero
+* 
+* Quotation only. No ERPNext core changes.
   */
 
 (() => {
@@ -24,13 +22,10 @@ const PATCH_FLAG = "__styleToneQuotationBatchV15";
 
 const SCAN_METHOD =
     "my_custom_app.quotation_batch.scan_barcode_with_variants";
-
 const BATCH_METHOD =
     "my_custom_app.quotation_batch.get_available_batches";
-
 const PRICE_METHOD =
     "my_custom_app.quotation_batch.get_batch_item_price";
-
 const DETAILS_METHOD =
     "erpnext.stock.get_item_details.get_item_details";
 
@@ -43,11 +38,7 @@ let processing = false;
 // ---------------------------------------------------------
 
 function supported(frm) {
-    return Boolean(
-        frm &&
-        frm.doc &&
-        frm.doc.doctype === "Quotation"
-    );
+    return Boolean(frm?.doc?.doctype === "Quotation");
 }
 
 function getWarehouse(frm) {
@@ -84,36 +75,14 @@ function esc(value) {
 function showError(error) {
     console.error(PREFIX, error);
 
-    let message =
-        error?.message ||
-        (typeof error === "string" ? error : null) ||
-        __("Barcode processing failed.");
-
-    try {
-        const serverMessages = error?._server_messages;
-
-        if (serverMessages) {
-            const parsed = JSON.parse(serverMessages);
-            if (Array.isArray(parsed) && parsed.length) {
-                message = parsed
-                    .map((entry) => {
-                        try {
-                            return JSON.parse(entry).message || entry;
-                        } catch {
-                            return entry;
-                        }
-                    })
-                    .join("<br>");
-            }
-        }
-    } catch {
-        // Keep the original error message.
-    }
-
     frappe.msgprint({
         title: __("Quotation Barcode / Batch Error"),
         indicator: "red",
-        message: esc(message)
+        message: esc(
+            error?.message ||
+            (typeof error === "string" ? error : null) ||
+            __("Barcode processing failed.")
+        )
     });
 }
 
@@ -162,7 +131,7 @@ function getPriceListRate(priceResult) {
 }
 
 // ---------------------------------------------------------
-// TABLE SELECTION DIALOG
+// SELECTION TABLE
 // ---------------------------------------------------------
 
 function selectFromTable(title, rows, columns) {
@@ -229,7 +198,7 @@ function selectFromTable(title, rows, columns) {
             `;
         }).join("");
 
-        const html = `
+        dialog.fields_dict.selection_table.$wrapper.html(`
             <div class="table-responsive"
                  style="max-height:55vh;overflow:auto;">
                 <table class="table table-bordered table-hover">
@@ -242,12 +211,10 @@ function selectFromTable(title, rows, columns) {
                     <tbody>${body}</tbody>
                 </table>
             </div>
-        `;
-
-        dialog.fields_dict.selection_table.$wrapper.html(html);
+        `);
 
         dialog.fields_dict.selection_table.$wrapper.on(
-            "click.styleToneQuotation",
+            "click.styleToneQuotationV15",
             ".st-select",
             function () {
                 const index = Number(
@@ -260,10 +227,10 @@ function selectFromTable(title, rows, columns) {
         );
 
         dialog.$wrapper.on(
-            "hidden.bs.modal.styleToneQuotation",
+            "hidden.bs.modal.styleToneQuotationV15",
             () => {
                 finish(null);
-                dialog.$wrapper.off(".styleToneQuotation");
+                dialog.$wrapper.off(".styleToneQuotationV15");
             }
         );
 
@@ -280,8 +247,9 @@ async function chooseVariant(response) {
 
     if (!variants.length) {
         notify(
-            `No variants with positive available stock were found ` +
-            `for ${response?.item_name || response?.item_code}.`,
+            `No variants with positive available stock were found for ${
+                response?.item_name || response?.item_code || ""
+            }.`,
             "orange"
         );
 
@@ -292,22 +260,10 @@ async function chooseVariant(response) {
         __("Select Item Variant"),
         variants,
         [
-            {
-                field: "item_code",
-                label: __("Item Code")
-            },
-            {
-                field: "item_name",
-                label: __("Item Name")
-            },
-            {
-                field: "has_batch_no",
-                label: __("Batch Tracked")
-            },
-            {
-                field: "available_qty",
-                label: __("Available Qty")
-            }
+            { field: "item_code", label: __("Item Code") },
+            { field: "item_name", label: __("Item Name") },
+            { field: "has_batch_no", label: __("Batch Tracked") },
+            { field: "available_qty", label: __("Available Qty") }
         ]
     );
 }
@@ -323,7 +279,6 @@ async function chooseBatch(frm, itemCode) {
         frappe.msgprint(
             __("Select a Warehouse before scanning.")
         );
-
         return null;
     }
 
@@ -337,7 +292,6 @@ async function chooseBatch(frm, itemCode) {
             `No positive-quantity batches are available for ${itemCode}.`,
             "orange"
         );
-
         return null;
     }
 
@@ -345,18 +299,9 @@ async function chooseBatch(frm, itemCode) {
         __("Select Batch"),
         batches,
         [
-            {
-                field: "batch_no",
-                label: __("Batch No")
-            },
-            {
-                field: "expiry_date",
-                label: __("Expiry Date")
-            },
-            {
-                field: "available_qty",
-                label: __("Available Qty")
-            }
+            { field: "batch_no", label: __("Batch No") },
+            { field: "expiry_date", label: __("Expiry Date") },
+            { field: "available_qty", label: __("Available Qty") }
         ]
     );
 }
@@ -382,7 +327,7 @@ async function getStandardItemDetails(frm, itemCode, batchNo) {
         currency: frm.doc.currency,
         plc_conversion_rate: frm.doc.plc_conversion_rate || 1,
         conversion_rate: frm.doc.conversion_rate || 1,
-        warehouse: warehouse,
+        warehouse,
         set_warehouse: frm.doc.set_warehouse || warehouse,
         qty: 1,
         batch_no: batchNo || "",
@@ -400,10 +345,7 @@ async function getStandardItemDetails(frm, itemCode, batchNo) {
         );
     }
 
-    if (
-        details.item_code &&
-        details.item_code !== itemCode
-    ) {
+    if (details.item_code && details.item_code !== itemCode) {
         throw new Error(
             __("ERPNext returned details for a different item.")
         );
@@ -413,46 +355,51 @@ async function getStandardItemDetails(frm, itemCode, batchNo) {
 }
 
 // ---------------------------------------------------------
-// ITEM PRICE LOOKUP
+// PRICE LOOKUP
 //
-// Python method should search:
-// 1. Exact batch Item Price, when a batch is selected.
-// 2. Blank-batch Item Price as fallback.
-// 3. Return found=false when neither exists.
+// Python must perform:
+// 1. Exact batch Item Price.
+// 2. Blank-batch Item Price fallback.
+// 3. found=false if neither exists.
 //
-// For non-batch items, batchNo is empty, so only the
-// blank-batch Item Price is applicable.
+// For non-batch items, batch_no is empty.
 // ---------------------------------------------------------
 
 async function getBatchPrice(frm, itemCode, batchNo, uom) {
-    if (!getSellingPriceList(frm)) {
+    const priceList = getSellingPriceList(frm);
+
+    if (!priceList) {
         return {
             found: false,
-            price_list_rate: 0,
-            reason: "missing_price_list"
+            price_list_rate: 0
         };
     }
 
     const result = await serverCall(PRICE_METHOD, {
         item_code: itemCode,
         batch_no: batchNo || "",
-        price_list: getSellingPriceList(frm),
+        price_list: priceList,
         transaction_date: frm.doc.transaction_date,
         customer: getCustomer(frm),
         uom: uom || ""
     });
 
-    return result?.found
-        ? result
-        : {
+    if (!result || result.found !== true) {
+        return {
             found: false,
-            price_list_rate: 0,
-            reason: "price_not_found"
+            price_list_rate: 0
         };
+    }
+
+    return {
+        ...result,
+        found: true,
+        price_list_rate: Number(result.price_list_rate || 0)
+    };
 }
 
 // ---------------------------------------------------------
-// APPLY ERPNext DETAILS TO CHILD ROW
+// APPLY STANDARD ITEM DETAILS
 // ---------------------------------------------------------
 
 function applyDetailsToRow(row, details) {
@@ -476,23 +423,28 @@ function applyDetailsToRow(row, details) {
         }
 
         const df = meta.fields.find(
-            (fieldDefinition) =>
-                fieldDefinition.fieldname === field
+            (definition) => definition.fieldname === field
         );
 
-        if (!df) continue;
-
-        row[field] = value;
+        if (df) {
+            row[field] = value;
+        }
     }
 }
 
 // ---------------------------------------------------------
-// SET PRICE AFTER STANDARD DETAILS
+// ENFORCE FINAL PRICE
+//
+// Called AFTER quantity changes and after standard details.
+// Direct assignment after set_value avoids a subsequent
+// asynchronous field update leaving a stale batch price.
 // ---------------------------------------------------------
 
-async function applyFinalPrice(row, priceResult) {
+async function enforcePrice(row, priceResult) {
     const finalRate = getPriceListRate(priceResult);
 
+    // First update through the model so ERPNext field handlers
+    // and dependent values can run.
     await frappe.model.set_value(
         row.doctype,
         row.name,
@@ -507,11 +459,16 @@ async function applyFinalPrice(row, priceResult) {
         finalRate
     );
 
+    // Then enforce the selected Item Price result.
+    // This prevents a previous standard rate from remaining.
+    row.price_list_rate = finalRate;
+    row.rate = finalRate;
+
     return finalRate;
 }
 
 // ---------------------------------------------------------
-// ADD ITEM OR INCREASE MATCHING ROW
+// ADD ITEM OR REUSE SAME ITEM + BATCH + WAREHOUSE ROW
 // ---------------------------------------------------------
 
 async function addQuotationItem(
@@ -535,7 +492,7 @@ async function addQuotationItem(
         );
     }
 
-    // Same item + same batch + same warehouse reuses the row.
+    // Match using the concrete item, exact custom batch and warehouse.
     const existing = (frm.doc.items || []).find((row) =>
         row.item_code === itemCode &&
         String(row[BATCH_FIELD] || "") === String(batchNo) &&
@@ -543,6 +500,7 @@ async function addQuotationItem(
     );
 
     if (existing) {
+        // Increase quantity first.
         await frappe.model.set_value(
             existing.doctype,
             existing.name,
@@ -550,6 +508,7 @@ async function addQuotationItem(
             Number(existing.qty || 0) + 1
         );
 
+        // Restore batch value after quantity-triggered updates.
         if (hasBatchField) {
             await frappe.model.set_value(
                 existing.doctype,
@@ -557,11 +516,13 @@ async function addQuotationItem(
                 BATCH_FIELD,
                 batchNo
             );
+
+            existing[BATCH_FIELD] = batchNo;
         }
 
-        // Always apply the custom price result.
-        // If no Item Price was found, final rate is zero.
-        await applyFinalPrice(existing, priceResult);
+        // CRITICAL FIX:
+        // Reapply the price fetched for THIS batch on every scan.
+        await enforcePrice(existing, priceResult);
 
         frm.refresh_field("items");
         frm.dirty();
@@ -569,7 +530,7 @@ async function addQuotationItem(
         return existing;
     }
 
-    // Reuse a genuinely empty row, otherwise create one.
+    // Find an empty child row or create a new one.
     let row = (frm.doc.items || []).find((child) =>
         !child.item_code &&
         !child[BATCH_FIELD]
@@ -583,7 +544,7 @@ async function addQuotationItem(
 
     applyDetailsToRow(row, details);
 
-    // Restore concrete item code and custom values after details.
+    // Restore concrete item and selected warehouse.
     row.item_code = itemCode;
     row.qty = 1;
     row.warehouse = warehouse || row.warehouse || "";
@@ -592,14 +553,10 @@ async function addQuotationItem(
         row[BATCH_FIELD] = batchNo;
     }
 
-    // Do not retain the standard rate when custom Item Price
-    // lookup found no applicable record.
-    const finalRate = getPriceListRate(priceResult);
+    // Always enforce the fetched result. If not found, rate = 0.
+    await enforcePrice(row, priceResult);
 
-    row.price_list_rate = finalRate;
-    row.rate = finalRate;
-
-    // Keep the custom batch value after applying details.
+    // Restore custom batch after all model field updates.
     if (hasBatchField) {
         row[BATCH_FIELD] = batchNo;
     }
@@ -612,6 +569,15 @@ async function addQuotationItem(
         frm.trigger("calculate_taxes_and_totals");
     }
 
+    // Re-enforce after totals calculation as well.
+    // This protects the selected price from immediate recalculation.
+    await enforcePrice(row, priceResult);
+
+    if (hasBatchField) {
+        row[BATCH_FIELD] = batchNo;
+    }
+
+    frm.refresh_field("items");
     frm.dirty();
 
     return row;
@@ -628,13 +594,10 @@ async function processBarcode(frm, rawBarcode) {
 
     if (!barcode || processing) return;
 
-    const warehouse = getWarehouse(frm);
-
-    if (!warehouse) {
+    if (!getWarehouse(frm)) {
         frappe.msgprint(
             __("Select a Warehouse before scanning.")
         );
-
         return;
     }
 
@@ -643,7 +606,7 @@ async function processBarcode(frm, rawBarcode) {
     try {
         const response = await serverCall(SCAN_METHOD, {
             barcode,
-            warehouse
+            warehouse: getWarehouse(frm)
         });
 
         if (!response || response.found !== true) {
@@ -652,7 +615,6 @@ async function processBarcode(frm, rawBarcode) {
                 `No item was found for barcode ${barcode}.`,
                 "orange"
             );
-
             return;
         }
 
@@ -660,7 +622,6 @@ async function processBarcode(frm, rawBarcode) {
 
         if (response.is_template === true) {
             chosen = await chooseVariant(response);
-
             if (!chosen) return;
         } else {
             chosen = response.item;
@@ -674,7 +635,7 @@ async function processBarcode(frm, rawBarcode) {
 
         const itemCode = chosen.item_code;
 
-        // Confirm the selected item is a concrete stock item.
+        // Validate the concrete selected item.
         const itemResult = await frappe.db.get_value(
             "Item",
             itemCode,
@@ -708,7 +669,7 @@ async function processBarcode(frm, rawBarcode) {
             );
         }
 
-        // Only batch-tracked items open the batch picker.
+        // Batch popup only for batch-tracked items.
         let selectedBatch = null;
 
         if (Number(item.has_batch_no) === 1) {
@@ -719,7 +680,7 @@ async function processBarcode(frm, rawBarcode) {
 
         const batchNo = selectedBatch?.batch_no || "";
 
-        // Fetch standard ERPNext item details for the concrete item.
+        // Fetch standard details for the selected concrete variant.
         const details = await getStandardItemDetails(
             frm,
             itemCode,
@@ -731,8 +692,7 @@ async function processBarcode(frm, rawBarcode) {
             details.stock_uom ||
             "";
 
-        // Exact batch price -> blank-batch fallback in Python.
-        // Non-batch items query blank-batch pricing.
+        // Fetch price for the exact selected batch, then fallback.
         const priceResult = await getBatchPrice(
             frm,
             itemCode,
@@ -752,7 +712,7 @@ async function processBarcode(frm, rawBarcode) {
             notify(
                 `Added ${itemCode}` +
                 (batchNo ? `, batch ${batchNo}` : "") +
-                `. Item Price: ${getPriceListRate(priceResult)}.`
+                `. Applied price ${getPriceListRate(priceResult)}.`
             );
         } else {
             notify(
@@ -771,12 +731,6 @@ async function processBarcode(frm, rawBarcode) {
 
 // ---------------------------------------------------------
 // SCANNER PATCH
-//
-// Intercepts only Quotation scans. Other doctypes continue
-// through ERPNext's original scanner.
-//
-// Do not also register a custom Quotation scan_barcode
-// handler here: that can process the same barcode twice.
 // ---------------------------------------------------------
 
 function installScannerPatch() {
@@ -813,7 +767,7 @@ function installScannerPatch() {
             return original.apply(this, args);
         }
 
-        // Clear the field without firing another scan event.
+        // Clear scan input without invoking a second scan.
         if (frm.doc.scan_barcode) {
             frm.doc.scan_barcode = "";
 
@@ -826,7 +780,7 @@ function installScannerPatch() {
 
         processBarcode(frm, barcode).catch(showError);
 
-        // Do not pass this Quotation scan to the core handler.
+        // Prevent core scanner from processing this Quotation scan.
         return Promise.resolve();
     };
 
@@ -835,9 +789,7 @@ function installScannerPatch() {
         configurable: false
     });
 
-    console.info(
-        `${PREFIX} Quotation scanner connected (V15).`
-    );
+    console.info(`${PREFIX} Quotation scanner connected (V15).`);
 
     return true;
 }
@@ -847,12 +799,12 @@ function installScannerPatch() {
 // ---------------------------------------------------------
 
 frappe.ui.form.on("Quotation", {
-    refresh(frm) {
+    refresh() {
         installScannerPatch();
     }
 });
 
-// Manual browser-console test:
+// Browser-console test:
 // StyleToneQuotationBatch.processBarcode(cur_frm, "BARCODE")
 window.StyleToneQuotationBatch = {
     processBarcode,
