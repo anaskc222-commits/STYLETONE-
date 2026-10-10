@@ -1,7 +1,8 @@
+
 (() => {
     "use strict";
 
-    const FLAG = "__styleToneQuotationBatchV9";
+    const FLAG = "__styleToneQuotationBatchV10";
 
     if (window[FLAG]) return;
     window[FLAG] = true;
@@ -9,6 +10,7 @@
     const API = "my_custom_app.quotation_batch";
     const SCAN_METHOD = `${API}.scan_barcode_with_variants`;
     const BATCH_METHOD = `${API}.get_available_batches`;
+    const PRICE_METHOD = `${API}.get_batch_item_price`;
     const DETAILS_METHOD =
         "erpnext.stock.get_item_details.get_item_details";
 
@@ -18,14 +20,16 @@
 
     function isQuotation(frm) {
         return Boolean(
-            frm &&
-            frm.doc &&
-            frm.doc.doctype === "Quotation"
+            frm?.doc?.doctype === "Quotation"
         );
     }
 
     function getWarehouse(frm) {
-        return String(frm.doc.custom_warehouse || "").trim();
+        return String(
+            frm.doc.custom_warehouse ||
+            frm.doc.set_warehouse ||
+            ""
+        ).trim();
     }
 
     function positiveQty(item) {
@@ -44,7 +48,7 @@
 
     function notify(message, indicator = "orange") {
         frappe.show_alert({
-            message: __(message),
+            message,
             indicator
         });
     }
@@ -82,24 +86,21 @@
         if (!batchNo) return;
 
         await setChildValue(row, "batch_no", batchNo);
-        await setChildValue(
-            row,
-            "custom_batch_no",
-            batchNo
-        );
+        await setChildValue(row, "custom_batch_no", batchNo);
     }
 
     // ---------------------------------------------------------
-    // VARIANT SELECTOR
+    // GENERIC SELECTOR DIALOG
     // ---------------------------------------------------------
 
-    function chooseVariant(variants) {
+    function chooseRow({
+        title,
+        rows,
+        columns,
+        buttonClass
+    }) {
         return new Promise((resolve) => {
-            const available = (variants || []).filter(
-                positiveQty
-            );
-
-            if (!available.length) {
+            if (!rows?.length) {
                 resolve(null);
                 return;
             }
@@ -117,30 +118,41 @@
                 resolve(value || null);
             }
 
-            const rows = available.map((item, index) => `
-                <tr>
-                    <td>${escapeHtml(item.item_code)}</td>
-                    <td>${escapeHtml(item.item_name || "")}</td>
-                    <td>${escapeHtml(
-                        item.available_qty ?? item.qty ?? 0
-                    )}</td>
-                    <td>
-                        <button
-                            type="button"
-                            class="btn btn-primary btn-xs st-select-variant"
-                            data-index="${index}">
-                            ${__("Select")}
-                        </button>
-                    </td>
-                </tr>
-            `).join("");
+            const header = columns.map(
+                column => `<th>${escapeHtml(column.label)}</th>`
+            ).join("");
+
+            const body = rows.map((item, index) => {
+                const cells = columns.map(column => {
+                    if (column.action) {
+                        return `
+                            <td>
+                                <button
+                                    type="button"
+                                    class="btn btn-primary btn-xs ${buttonClass}"
+                                    data-index="${index}">
+                                    ${__("Select")}
+                                </button>
+                            </td>
+                        `;
+                    }
+
+                    return `
+                        <td>${escapeHtml(
+                            column.value(item) ?? "-"
+                        )}</td>
+                    `;
+                }).join("");
+
+                return `<tr>${cells}</tr>`;
+            }).join("");
 
             dialog = new frappe.ui.Dialog({
-                title: __("Select Available Variant"),
+                title,
                 size: "large",
                 fields: [{
                     fieldtype: "HTML",
-                    fieldname: "variant_list"
+                    fieldname: "selector_html"
                 }],
                 primary_action_label: __("Cancel"),
                 primary_action() {
@@ -148,27 +160,20 @@
                 }
             });
 
-            dialog.fields_dict.variant_list.$wrapper.html(`
+            dialog.fields_dict.selector_html.$wrapper.html(`
                 <div class="table-responsive">
                     <table class="table table-bordered">
-                        <thead>
-                            <tr>
-                                <th>${__("Item Code")}</th>
-                                <th>${__("Item Name")}</th>
-                                <th>${__("Available Qty")}</th>
-                                <th>${__("Action")}</th>
-                            </tr>
-                        </thead>
-                        <tbody>${rows}</tbody>
+                        <thead><tr>${header}</tr></thead>
+                        <tbody>${body}</tbody>
                     </table>
                 </div>
             `);
 
-            dialog.fields_dict.variant_list.$wrapper
-                .find(".st-select-variant")
+            dialog.fields_dict.selector_html.$wrapper
+                .find(`.${buttonClass}`)
                 .on("click", function () {
                     const index = Number(this.dataset.index);
-                    finish(available[index] || null);
+                    finish(rows[index] || null);
                 });
 
             dialog.onhide = () => {
@@ -181,99 +186,62 @@
         });
     }
 
-    // ---------------------------------------------------------
-    // BATCH SELECTOR
-    // ---------------------------------------------------------
+    function chooseVariant(variants) {
+        return chooseRow({
+            title: __("Select Available Variant"),
+            rows: (variants || []).filter(positiveQty),
+            buttonClass: "st-select-variant",
+            columns: [
+                {
+                    label: __("Item Code"),
+                    value: row => row.item_code
+                },
+                {
+                    label: __("Item Name"),
+                    value: row => row.item_name
+                },
+                {
+                    label: __("Batch Tracked"),
+                    value: row =>
+                        Number(row.has_batch_no) ? __("Yes") : __("No")
+                },
+                {
+                    label: __("Available Qty"),
+                    value: row =>
+                        row.available_qty ?? row.qty
+                },
+                {
+                    label: __("Action"),
+                    action: true
+                }
+            ]
+        });
+    }
 
     function chooseBatch(batches) {
-        return new Promise((resolve) => {
-            const available = (batches || []).filter(
-                positiveQty
-            );
-
-            if (!available.length) {
-                resolve(null);
-                return;
-            }
-
-            let settled = false;
-            let dialog;
-
-            function finish(value) {
-                if (settled) return;
-
-                settled = true;
-
-                if (dialog) dialog.hide();
-
-                resolve(value || null);
-            }
-
-            const rows = available.map((batch, index) => `
-                <tr>
-                    <td>${escapeHtml(
-                        batch.batch_no || batch.name
-                    )}</td>
-                    <td>${escapeHtml(
-                        batch.expiry_date || "-"
-                    )}</td>
-                    <td>${escapeHtml(
-                        batch.available_qty ?? batch.qty ?? 0
-                    )}</td>
-                    <td>
-                        <button
-                            type="button"
-                            class="btn btn-primary btn-xs st-select-batch"
-                            data-index="${index}">
-                            ${__("Select")}
-                        </button>
-                    </td>
-                </tr>
-            `).join("");
-
-            dialog = new frappe.ui.Dialog({
-                title: __("Select Available Batch"),
-                size: "large",
-                fields: [{
-                    fieldtype: "HTML",
-                    fieldname: "batch_list"
-                }],
-                primary_action_label: __("Cancel"),
-                primary_action() {
-                    finish(null);
+        return chooseRow({
+            title: __("Select Available Batch"),
+            rows: (batches || []).filter(positiveQty),
+            buttonClass: "st-select-batch",
+            columns: [
+                {
+                    label: __("Batch No"),
+                    value: row => row.batch_no || row.name
+                },
+                {
+                    label: __("Expiry Date"),
+                    value: row => row.expiry_date || "-"
+                },
+                {
+                    label: __("Available Qty"),
+                    value: row =>
+                        row.available_qty ?? row.qty
+                },
+                {
+                    label: __("Action"),
+                    action: true
                 }
-            });
-
-            dialog.fields_dict.batch_list.$wrapper.html(`
-                <div class="table-responsive">
-                    <table class="table table-bordered">
-                        <thead>
-                            <tr>
-                                <th>${__("Batch No")}</th>
-                                <th>${__("Expiry Date")}</th>
-                                <th>${__("Available Qty")}</th>
-                                <th>${__("Action")}</th>
-                            </tr>
-                        </thead>
-                        <tbody>${rows}</tbody>
-                    </table>
-                </div>
-            `);
-
-            dialog.fields_dict.batch_list.$wrapper
-                .find(".st-select-batch")
-                .on("click", function () {
-                    const index = Number(this.dataset.index);
-                    finish(available[index] || null);
-                });
-
-            dialog.onhide = () => {
-                if (settled) return;
-                settled = true;
-                resolve(null);
-            };
-
-            dialog.show();
+            ]
         });
     }
 
@@ -331,7 +299,7 @@
     }
 
     // ---------------------------------------------------------
-    // STANDARD ERPNext ITEM DETAILS
+    // STANDARD ERPNEXT ITEM DETAILS
     // ---------------------------------------------------------
 
     async function fetchCoreItemDetails(
@@ -343,7 +311,7 @@
         const ctx = {
             doctype: "Quotation",
             item_code: itemCode,
-            warehouse: warehouse,
+            warehouse,
             set_warehouse: warehouse,
             batch_no: batchNo || "",
             company: frm.doc.company,
@@ -352,8 +320,7 @@
                 frm.doc.customer ||
                 "",
             quotation_to: frm.doc.quotation_to || "Customer",
-            transaction_date:
-                frm.doc.transaction_date,
+            transaction_date: frm.doc.transaction_date,
             price_list:
                 frm.doc.selling_price_list ||
                 frm.doc.price_list ||
@@ -366,8 +333,7 @@
                 frm.doc.price_list_currency ||
                 frm.doc.currency,
             currency: frm.doc.currency,
-            conversion_rate:
-                frm.doc.conversion_rate || 1,
+            conversion_rate: frm.doc.conversion_rate || 1,
             plc_conversion_rate:
                 frm.doc.plc_conversion_rate || 1,
             ignore_pricing_rule:
@@ -375,15 +341,10 @@
             qty: 1
         };
 
-        /*
-         * ERPNext v16 uses the named parameter "ctx".
-         * Pass ctx and doc as objects; frappe.call handles
-         * serialization for the RPC request.
-         */
         const response = await frappe.call({
             method: DETAILS_METHOD,
             args: {
-                ctx: ctx,
+                ctx,
                 doc: frm.doc
             },
             freeze: true,
@@ -404,14 +365,87 @@
     }
 
     // ---------------------------------------------------------
-    // FIND MATCHING ROW
+    // BATCH-SPECIFIC PRICE
+    // ---------------------------------------------------------
+
+    async function applyBatchPrice(
+        frm,
+        itemCode,
+        batchNo,
+        details
+    ) {
+        if (!batchNo) return details;
+
+        const priceList =
+            frm.doc.selling_price_list ||
+            frm.doc.price_list ||
+            "";
+
+        if (!priceList) {
+            console.warn(
+                "[StyleTone Quotation Batch] No selling price list selected."
+            );
+            return details;
+        }
+
+        const result = await call(PRICE_METHOD, {
+            item_code: itemCode,
+            batch_no: batchNo,
+            price_list: priceList,
+            transaction_date: frm.doc.transaction_date,
+            customer:
+                frm.doc.party_name ||
+                frm.doc.customer ||
+                "",
+            uom: details.uom || ""
+        });
+
+        if (result?.found) {
+            const rate = Number(result.price_list_rate);
+
+            if (!Number.isFinite(rate) || rate < 0) {
+                throw new Error(
+                    __("Invalid batch-specific Item Price.")
+                );
+            }
+
+            details.price_list_rate = rate;
+            details.rate = rate;
+
+            console.info(
+                "[StyleTone Quotation Batch] Batch price found.",
+                {
+                    item_code: itemCode,
+                    batch_no: batchNo,
+                    item_price: result.item_price,
+                    rate
+                }
+            );
+        } else {
+            console.info(
+                "[StyleTone Quotation Batch] No batch-specific price; " +
+                "keeping ERPNext standard price.",
+                {
+                    item_code: itemCode,
+                    batch_no: batchNo,
+                    price_list: priceList,
+                    reason: result?.reason || ""
+                }
+            );
+        }
+
+        return details;
+    }
+
+    // ---------------------------------------------------------
+    // MATCH EXISTING ITEM ROW
     // ---------------------------------------------------------
 
     function findReusableRow(frm, itemCode, batchNo) {
         const items = frm.doc.items || [];
         const selectedBatch = String(batchNo || "");
 
-        const existing = items.find((row) => {
+        const existing = items.find(row => {
             if (row.item_code !== itemCode) return false;
 
             const rowBatch = String(
@@ -431,7 +465,7 @@
         }
 
         const blankRow = items.find(
-            (row) => !row.item_code
+            row => !row.item_code
         );
 
         if (blankRow) {
@@ -448,7 +482,7 @@
     }
 
     // ---------------------------------------------------------
-    // APPLY ITEM DETAILS
+    // APPLY DETAILS AND BATCH PRICE
     // ---------------------------------------------------------
 
     async function applyItemDetails(
@@ -464,7 +498,6 @@
             batchNo
         );
 
-        // Same item and same batch: increment quantity.
         if (match.row && match.existing) {
             const row = match.row;
 
@@ -474,20 +507,30 @@
                 (Number(row.qty) || 0) + 1
             );
 
+            await setChildValue(row, "warehouse", warehouse);
             await setBatch(row, batchNo);
 
-            await setChildValue(
-                row,
-                "warehouse",
-                warehouse
-            );
+            // Apply batch-specific rate when one was found.
+            if (details.price_list_rate != null) {
+                await setChildValue(
+                    row,
+                    "price_list_rate",
+                    details.price_list_rate
+                );
+            }
+
+            if (details.rate != null) {
+                await setChildValue(
+                    row,
+                    "rate",
+                    details.rate
+                );
+            }
 
             frm.refresh_field("items");
             frm.dirty();
 
-            await frm.trigger(
-                "calculate_taxes_and_totals"
-            );
+            await frm.trigger("calculate_taxes_and_totals");
 
             notify(
                 __("Quantity increased for {0}.", [itemCode]),
@@ -498,8 +541,6 @@
         }
 
         const row = match.row || frm.add_child("items");
-
-        row.item_code = itemCode;
 
         const excluded = new Set([
             "name",
@@ -516,36 +557,26 @@
         ]);
 
         /*
-         * Use the standard details returned by ERPNext.
-         * Only set fields that exist on Quotation Item.
+         * Populate ERPNext item details first.
+         * Then explicitly apply item_code, warehouse, qty and batch.
          */
         for (const [fieldname, value] of Object.entries(details)) {
             if (excluded.has(fieldname)) continue;
-            if (value === undefined) continue;
+            if (value === undefined || value === null) continue;
             if (!hasChildField(fieldname)) continue;
 
-            await setChildValue(
-                row,
-                fieldname,
-                value
-            );
+            await setChildValue(row, fieldname, value);
         }
 
-        await setChildValue(
-            row,
-            "warehouse",
-            warehouse
-        );
-
+        await setChildValue(row, "item_code", itemCode);
+        await setChildValue(row, "warehouse", warehouse);
         await setChildValue(row, "qty", 1);
         await setBatch(row, batchNo);
 
         frm.refresh_field("items");
         frm.dirty();
 
-        await frm.trigger(
-            "calculate_taxes_and_totals"
-        );
+        await frm.trigger("calculate_taxes_and_totals");
 
         notify(
             __("Added {0} to the Quotation.", [itemCode]),
@@ -582,13 +613,10 @@
 
         try {
             // 1. Resolve barcode.
-            const raw = await call(
-                SCAN_METHOD,
-                {
-                    barcode: barcode,
-                    warehouse: warehouse
-                }
-            );
+            const raw = await call(SCAN_METHOD, {
+                barcode,
+                warehouse
+            });
 
             if (!raw) {
                 throw new Error(
@@ -602,14 +630,13 @@
 
             let selected = null;
 
-            // 2. Template barcode: select an available variant.
+            // 2. Select a variant when the barcode is a template.
             if (
                 result.is_template ||
                 Array.isArray(result.variants)
             ) {
-                const variants = (
-                    result.variants || []
-                ).filter(positiveQty);
+                const variants = (result.variants || [])
+                    .filter(positiveQty);
 
                 if (!variants.length) {
                     throw new Error(
@@ -632,24 +659,20 @@
 
             const itemCode = selected.item_code;
 
-            // 3. Validate the actual Item record.
+            // 3. Validate the actual selected item.
             const item = await getItemInfo(itemCode);
 
             let batchNo = "";
 
-            // 4. Batch-controlled item: select a positive-qty batch.
+            // 4. Ask for a batch only when the item is batch-controlled.
             if (Number(item.has_batch_no || 0)) {
-                const batchResponse = await call(
-                    BATCH_METHOD,
-                    {
-                        item_code: itemCode,
-                        warehouse: warehouse
-                    }
-                );
+                const batchResponse = await call(BATCH_METHOD, {
+                    item_code: itemCode,
+                    warehouse
+                });
 
-                const batches = (
-                    batchResponse || []
-                ).filter(positiveQty);
+                const batches = (batchResponse || [])
+                    .filter(positiveQty);
 
                 if (!batches.length) {
                     throw new Error(
@@ -678,7 +701,7 @@
                 }
             }
 
-            // 5. Fetch standard ERPNext pricing and item details.
+            // 5. Fetch ERPNext standard item details.
             const details = await fetchCoreItemDetails(
                 frm,
                 itemCode,
@@ -686,7 +709,15 @@
                 batchNo
             );
 
-            // 6. Add the item or update the matching row.
+            // 6. Override the rate only if a matching batch price exists.
+            await applyBatchPrice(
+                frm,
+                itemCode,
+                batchNo,
+                details
+            );
+
+            // 7. Add/update the correct item and batch row.
             await applyItemDetails(
                 frm,
                 itemCode,
@@ -712,7 +743,7 @@
     }
 
     // ---------------------------------------------------------
-    // OPTIONAL ERPNext BARCODE SCANNER INTEGRATION
+    // ERPNext BARCODE SCANNER INTEGRATION
     // ---------------------------------------------------------
 
     function installScannerPatch() {
@@ -726,7 +757,9 @@
             return;
         }
 
-        if (Scanner.prototype.__styleToneQuotationBatchV9) {
+        if (
+            Scanner.prototype.__styleToneQuotationBatchV10
+        ) {
             return;
         }
 
@@ -738,7 +771,10 @@
         ) {
             const frm = window.cur_frm;
 
-            if (isQuotation(frm) && !frm.doc.is_pos) {
+            if (
+                isQuotation(frm) &&
+                !frm.doc.is_pos
+            ) {
                 const barcode =
                     typeof data === "string"
                         ? data
@@ -756,7 +792,7 @@
             return original.call(this, data, ...args);
         };
 
-        Scanner.prototype.__styleToneQuotationBatchV9 = true;
+        Scanner.prototype.__styleToneQuotationBatchV10 = true;
 
         console.info(
             "[StyleTone Quotation Batch] Scanner integration installed."
