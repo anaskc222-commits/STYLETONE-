@@ -1,3 +1,4 @@
+
 app_name = "my_custom_app"
 app_title = "STYLETONE"
 app_publisher = "STYLETONE"
@@ -5,13 +6,14 @@ app_description = "STYLETONE custom Frappe application"
 app_email = "your-email@example.com"
 app_license = "MIT"
 
+
 doctype_js = {
     "Sales Invoice": "public/js/sales_invoice_batch.js",
 
-"Quotation": "public/js/quotation_batch.js",
-
-"Quotation": "public/js/quotation_sales_invoice.js",
-
+    "Quotation": [
+        "public/js/quotation_batch.js",
+        "public/js/quotation_sales_invoice.js",
+    ],
 }
 
 
