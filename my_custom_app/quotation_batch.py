@@ -315,11 +315,12 @@ def get_available_batches(item_code, warehouse):
 # Quotation Item field: custom_batch_no
 # ============================================================
 
+
 @frappe.whitelist()
 def get_batch_item_price(
     item_code,
-    batch_no,
-    price_list,
+    batch_no=None,
+    price_list=None,
     transaction_date=None,
     customer=None,
     uom=None,
@@ -331,111 +332,113 @@ def get_batch_item_price(
     uom = (uom or "").strip()
     transaction_date = transaction_date or today()
 
-    if not item_code or not batch_no or not price_list:
+    if not item_code or not price_list:
         return {"found": False}
 
     meta = frappe.get_meta("Item Price")
 
     if not meta.has_field("batch_no"):
-        return {
-            "found": False,
-            "reason": "Item Price has no batch_no field.",
+        return {"found": False}
+
+    def find_price(search_batch):
+        conditions = [
+            "item_code = %(item_code)s",
+            "price_list = %(price_list)s",
+            "(batch_no = %(batch_no)s OR "
+            "(%(batch_no)s = '' AND "
+            "(batch_no IS NULL OR batch_no = '')))",
+        ]
+
+        values = {
+            "item_code": item_code,
+            "price_list": price_list,
+            "batch_no": search_batch or "",
+            "date": transaction_date,
         }
 
-    conditions = [
-        "item_code = %(item_code)s",
-        "price_list = %(price_list)s",
-        "batch_no = %(batch_no)s",
-    ]
+        if meta.has_field("valid_from"):
+            conditions.append(
+                "(valid_from IS NULL OR valid_from <= %(date)s)"
+            )
 
-    values = {
-        "item_code": item_code,
-        "price_list": price_list,
-        "batch_no": batch_no,
-    }
+        if meta.has_field("valid_upto"):
+            conditions.append(
+                "(valid_upto IS NULL OR valid_upto >= %(date)s)"
+            )
 
-    if meta.has_field("valid_from"):
-        conditions.append(
-            "(valid_from IS NULL OR valid_from <= %(date)s)"
-        )
-        values["date"] = transaction_date
+        if meta.has_field("customer") and customer:
+            conditions.append(
+                "(customer = %(customer)s OR "
+                "customer IS NULL OR customer = '')"
+            )
+            values["customer"] = customer
 
-    if meta.has_field("valid_upto"):
-        conditions.append(
-            "(valid_upto IS NULL OR valid_upto >= %(date)s)"
-        )
-        values["date"] = transaction_date
+        if meta.has_field("uom") and uom:
+            conditions.append(
+                "(uom = %(uom)s OR uom IS NULL OR uom = '')"
+            )
+            values["uom"] = uom
 
-    if meta.has_field("customer") and customer:
-        conditions.append(
-            "(customer = %(customer)s "
-            "OR customer IS NULL OR customer = '')"
-        )
-        values["customer"] = customer
+        fields = ["name", "price_list_rate", "batch_no"]
+        order = []
 
-    if meta.has_field("uom") and uom:
-        conditions.append(
-            "(uom = %(uom)s OR uom IS NULL OR uom = '')"
-        )
-        values["uom"] = uom
+        if meta.has_field("customer") and customer:
+            order.append("(customer = %(customer)s) DESC")
 
-    select_fields = ["name", "price_list_rate", "batch_no"]
-    order_fields = []
+        if meta.has_field("uom") and uom:
+            order.append("(uom = %(uom)s) DESC")
 
-    if meta.has_field("customer") and customer:
-        select_fields.append("customer")
-        order_fields.append(
-            "(customer = %(customer)s) DESC"
-        )
+        if meta.has_field("valid_from"):
+            order.append("valid_from DESC")
 
-    if meta.has_field("uom") and uom:
-        select_fields.append("uom")
-        order_fields.append(
-            "(uom = %(uom)s) DESC"
-        )
+        if meta.has_field("modified"):
+            order.append("modified DESC")
 
-    if meta.has_field("valid_from"):
-        select_fields.append("valid_from")
-        order_fields.append("valid_from DESC")
-
-    if meta.has_field("modified"):
-        select_fields.append("modified")
-        order_fields.append("modified DESC")
-
-    order_by = ", ".join(order_fields) or "name DESC"
-
-    rows = frappe.db.sql(
-        """
-        SELECT {select_fields}
-        FROM `tabItem Price`
-        WHERE {conditions}
-        ORDER BY {order_by}
-        LIMIT 1
-        """.format(
-            select_fields=", ".join(
-                "`{}`".format(field)
-                for field in select_fields
+        rows = frappe.db.sql(
+            """
+            SELECT {fields}
+            FROM `tabItem Price`
+            WHERE {conditions}
+            ORDER BY {order}
+            LIMIT 1
+            """.format(
+                fields=", ".join("`{}`".format(f) for f in fields),
+                conditions=" AND ".join(conditions),
+                order=", ".join(order) or "name DESC",
             ),
-            conditions=" AND ".join(conditions),
-            order_by=order_by,
-        ),
-        values,
-        as_dict=True,
-    )
+            values,
+            as_dict=True,
+        )
 
-    if not rows:
+        return rows[0] if rows else None
+
+    # Batch item: exact batch price first.
+    if batch_no:
+        row = find_price(batch_no)
+
+        if row:
+            return {
+                "found": True,
+                "match_type": "exact_batch",
+                "item_price": row.name,
+                "price_list_rate": flt(row.price_list_rate),
+                "batch_no": row.batch_no,
+            }
+
+    # Fallback: blank-batch Item Price.
+    row = find_price("")
+
+    if row:
         return {
-            "found": False,
-            "reason": "No matching batch-specific Item Price.",
+            "found": True,
+            "match_type": "blank_batch",
+            "item_price": row.name,
+            "price_list_rate": flt(row.price_list_rate),
+            "batch_no": row.batch_no,
         }
 
-    return {
-        "found": True,
-        "item_price": rows[0].name,
-        "price_list_rate": flt(rows[0].price_list_rate),
-        "rate": flt(rows[0].price_list_rate),
-        "batch_no": rows[0].batch_no,
-    }
+    return {"found": False, "price_list_rate": 0}
+
 
 
 # ============================================================
