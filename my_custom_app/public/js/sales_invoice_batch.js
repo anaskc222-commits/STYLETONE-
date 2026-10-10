@@ -2,8 +2,8 @@
 (() => {
     "use strict";
 
-    const FLAG = "__styleToneSalesInvoiceBatchV82";
-    const PATCH_FLAG = "__styleToneBatchV82Installed";
+    const FLAG = "__styleToneSalesInvoiceBatchV83";
+    const PATCH_FLAG = "__styleToneBatchV83Installed";
 
     if (window[FLAG]) return;
     window[FLAG] = true;
@@ -16,10 +16,6 @@
 
     const lookupCache = new Map();
     const MAX_CACHE_SIZE = 100;
-
-    // --------------------------------------------------------
-    // HELPERS
-    // --------------------------------------------------------
 
     function supported(frm) {
         return Boolean(
@@ -43,19 +39,8 @@
         );
     }
 
-    function positiveQty(value) {
-        const qty = Number(value || 0);
-        return Number.isFinite(qty) && qty > 0;
-    }
-
-    function hasField(doctype, fieldname) {
-        return Boolean(frappe.meta.has_field(doctype, fieldname));
-    }
-
     function getBarcodeValue(value) {
-        if (typeof value === "string") {
-            return value.trim();
-        }
+        if (typeof value === "string") return value.trim();
 
         if (value && typeof value === "object") {
             return String(
@@ -68,6 +53,10 @@
         }
 
         return "";
+    }
+
+    function hasField(doctype, fieldname) {
+        return Boolean(frappe.meta.has_field(doctype, fieldname));
     }
 
     function serverCall(method, args) {
@@ -88,7 +77,7 @@
     }
 
     function showError(error) {
-        console.error("[STYLETONE Sales Invoice V8.2]", error);
+        console.error("[STYLETONE Sales Invoice V8.3]", error);
 
         frappe.msgprint({
             title: __("Barcode Processing Failed"),
@@ -103,23 +92,18 @@
     }
 
     // --------------------------------------------------------
-    // BARCODE LOOKUP CACHE
-    // Cache item lookup only, never batch quantities.
+    // BARCODE LOOKUP
     // --------------------------------------------------------
 
     async function lookupBarcode(barcode) {
         const key = String(barcode || "").trim();
 
-        if (!key) {
-            return { found: false };
-        }
+        if (!key) return { found: false };
 
         if (lookupCache.has(key)) {
             const cached = lookupCache.get(key);
-
             lookupCache.delete(key);
             lookupCache.set(key, cached);
-
             return cached;
         }
 
@@ -131,8 +115,9 @@
 
         if (lookup.found === true) {
             if (lookupCache.size >= MAX_CACHE_SIZE) {
-                const oldest = lookupCache.keys().next().value;
-                lookupCache.delete(oldest);
+                lookupCache.delete(
+                    lookupCache.keys().next().value
+                );
             }
 
             lookupCache.set(key, lookup);
@@ -141,19 +126,13 @@
         return lookup;
     }
 
-    // --------------------------------------------------------
-    // NORMALIZE RESPONSE
-    // ERPNext Item field: has_variants.
-    // --------------------------------------------------------
-
     function normalizeLookup(response) {
         const item = response?.item || response;
 
         return {
-            isTemplate: (
+            isTemplate:
                 Number(response?.has_variants) === 1 ||
-                Number(item?.has_variants) === 1
-            ),
+                Number(item?.has_variants) === 1,
 
             variants:
                 response?.variants ||
@@ -165,7 +144,7 @@
     }
 
     // --------------------------------------------------------
-    // TABLE SELECTOR
+    // SELECTOR TABLE
     // --------------------------------------------------------
 
     function selectFromTable(title, rows, columns) {
@@ -188,7 +167,6 @@
 
             function finish(value) {
                 if (finished) return;
-
                 finished = true;
                 dialog.hide();
                 resolve(value);
@@ -224,7 +202,7 @@
                         <td>
                             <button
                                 type="button"
-                                class="btn btn-primary btn-xs st-v82-select"
+                                class="btn btn-primary btn-xs st-v83-select"
                                 data-index="${index}">
                                 ${__("Select")}
                             </button>
@@ -250,22 +228,21 @@
             `);
 
             dialog.fields_dict.selection_table.$wrapper.on(
-                "click.styleToneV82",
-                ".st-v82-select",
+                "click.styleToneV83",
+                ".st-v83-select",
                 function () {
                     const index = Number(
                         this.getAttribute("data-index")
                     );
-
                     finish(rows[index] || null);
                 }
             );
 
             dialog.$wrapper.on(
-                "hidden.bs.modal.styleToneV82",
+                "hidden.bs.modal.styleToneV83",
                 () => {
                     finish(null);
-                    dialog.$wrapper.off(".styleToneV82");
+                    dialog.$wrapper.off(".styleToneV83");
                 }
             );
 
@@ -290,7 +267,7 @@
             frappe.msgprint({
                 title: __("No Variants Found"),
                 message: __(
-                    "The barcode matched an item template, but no variants were returned by the Python lookup method."
+                    "The barcode matched a template, but the server returned no variants."
                 ),
                 indicator: "orange"
             });
@@ -302,31 +279,22 @@
             __("Select Item Variant"),
             variants,
             [
-                {
-                    field: "item_code",
-                    label: __("Item Code")
-                },
-                {
-                    field: "item_name",
-                    label: __("Item Name")
-                },
-                {
-                    field: "has_batch_no",
-                    label: __("Batch Tracked")
-                }
+                { field: "item_code", label: __("Item Code") },
+                { field: "item_name", label: __("Item Name") },
+                { field: "has_batch_no", label: __("Batch Tracked") }
             ]
         );
     }
 
     // --------------------------------------------------------
-    // ITEM MASTER VALIDATION
+    // VALIDATE ACTUAL ITEM
     // --------------------------------------------------------
 
     async function validateConcreteItem(itemCode) {
+        itemCode = String(itemCode || "").trim();
+
         if (!itemCode) {
-            throw new Error(
-                __("Selected item has no Item Code.")
-            );
+            throw new Error(__("Selected item has no Item Code."));
         }
 
         const response = await frappe.db.get_value(
@@ -361,10 +329,9 @@
             !master.variant_of
         ) {
             throw new Error(
-                __(
-                    "Item {0} is a template. Select one of its variants.",
-                    [itemCode]
-                )
+                __("Item {0} is a template. Select a variant.", [
+                    itemCode
+                ])
             );
         }
 
@@ -386,7 +353,7 @@
         )
             .filter(batch =>
                 batch?.batch_no &&
-                positiveQty(batch.qty ?? batch.available_qty)
+                Number(batch.qty ?? batch.available_qty ?? 0) > 0
             )
             .map(batch => ({
                 ...batch,
@@ -410,24 +377,18 @@
             __("Select Batch — {0}", [itemCode]),
             batches,
             [
-                {
-                    field: "batch_no",
-                    label: __("Batch No")
-                },
-                {
-                    field: "expiry_date",
-                    label: __("Expiry Date")
-                },
-                {
-                    field: "qty",
-                    label: __("Available Qty")
-                }
+                { field: "batch_no", label: __("Batch No") },
+                { field: "expiry_date", label: __("Expiry Date") },
+                { field: "qty", label: __("Available Qty") }
             ]
         );
     }
 
     // --------------------------------------------------------
-    // ADD ITEM
+    // ADD SELECTED VARIANT
+    // IMPORTANT: Do not set the scanned barcode on the row.
+    // A template barcode could cause ERPNext to resolve the
+    // template again and replace the selected variant.
     // --------------------------------------------------------
 
     async function addItem(
@@ -435,22 +396,20 @@
         item,
         warehouse,
         batchNo,
-        barcode,
         barcodeUom
     ) {
-        const itemCode = item.item_code;
+        const itemCode = String(item.item_code || "").trim();
+
+        // Validate the selected variant, not the original template.
         const master = await validateConcreteItem(itemCode);
 
         if (
             Number(master.has_batch_no) === 1 &&
-            !batchNo &&
-            !Number(master.has_serial_no)
+            !Number(master.has_serial_no) &&
+            !batchNo
         ) {
             throw new Error(
-                __(
-                    "Select a batch before adding batch-tracked item {0}.",
-                    [itemCode]
-                )
+                __("Select a batch for item {0}.", [itemCode])
             );
         }
 
@@ -470,7 +429,6 @@
 
             frm.refresh_field("items");
             frm.dirty();
-
             return existing;
         }
 
@@ -484,13 +442,16 @@
         let success = false;
 
         try {
-            // Let ERPNext run its standard item_code handler.
+            // Set the selected variant code.
             await frappe.model.set_value(
                 row.doctype,
                 row.name,
                 "item_code",
-                itemCode
+                master.name
             );
+
+            // Do not set row.barcode here. The scanned code may
+            // belong to the template rather than this variant.
 
             if (hasField(row.doctype, "warehouse")) {
                 await frappe.model.set_value(
@@ -501,16 +462,11 @@
                 );
             }
 
-            if (barcode && hasField(row.doctype, "barcode")) {
-                await frappe.model.set_value(
-                    row.doctype,
-                    row.name,
-                    "barcode",
-                    barcode
-                );
-            }
-
-            if (barcodeUom && hasField(row.doctype, "uom")) {
+            if (
+                barcodeUom &&
+                hasField(row.doctype, "uom") &&
+                !row.uom
+            ) {
                 await frappe.model.set_value(
                     row.doctype,
                     row.name,
@@ -537,11 +493,12 @@
                 );
             }
 
-            if (row.item_code !== itemCode) {
+            // Catch any unexpected template substitution.
+            if (row.item_code !== master.name) {
                 throw new Error(
                     __(
-                        "Unexpected item after ERPNext processing. Expected {0}, received {1}.",
-                        [itemCode, row.item_code || "-"]
+                        "Variant mismatch: selected {0}, but the row contains {1}.",
+                        [master.name, row.item_code || "-"]
                     )
                 );
             }
@@ -568,14 +525,13 @@
     }
 
     // --------------------------------------------------------
-    // MAIN BARCODE WORKFLOW
+    // MAIN WORKFLOW
     // --------------------------------------------------------
 
     async function processBarcode(frm, rawBarcode) {
         if (!supported(frm)) return false;
 
         const barcode = getBarcodeValue(rawBarcode);
-
         if (!barcode) return false;
 
         const warehouse = getWarehouse(frm);
@@ -588,7 +544,6 @@
                 ),
                 indicator: "orange"
             });
-
             return false;
         }
 
@@ -597,48 +552,47 @@
         if (!response || response.found !== true) {
             frappe.msgprint({
                 title: __("Item Not Found"),
-                message: __(
-                    "No item found for barcode {0}.",
-                    [barcode]
-                ),
+                message: __("No item found for barcode {0}.", [barcode]),
                 indicator: "red"
             });
-
             return false;
         }
 
         const normalized = normalizeLookup(response);
-        let chosen;
 
-        if (normalized.isTemplate) {
-            chosen = await selectVariant(response);
-            if (!chosen) return false;
-        } else {
-            chosen = normalized.item;
-        }
+        // Step 1: If template, choose an actual variant.
+        const chosen = normalized.isTemplate
+            ? await selectVariant(response)
+            : normalized.item;
 
-        if (!chosen?.item_code) {
+        if (!chosen) return false;
+
+        const chosenCode = String(chosen.item_code || "").trim();
+
+        if (!chosenCode) {
             throw new Error(
-                __("Barcode lookup did not return a valid Item Code.")
+                __("Lookup did not return the selected variant Item Code.")
             );
         }
 
-        const master = await validateConcreteItem(chosen.item_code);
+        // Step 2: Validate the actual selected variant.
+        const master = await validateConcreteItem(chosenCode);
+
+        // Step 3: For batch-only Items, select a batch first.
         let batchNo = "";
 
         if (
             Number(master.has_batch_no) === 1 &&
             !Number(master.has_serial_no)
         ) {
-            const batch = await selectBatch(
-                master.name,
-                warehouse
-            );
+            const batch = await selectBatch(master.name, warehouse);
 
             if (!batch) return false;
+
             batchNo = batch.batch_no;
         }
 
+        // Step 4: Add selected variant with selected batch.
         await addItem(
             frm,
             {
@@ -647,8 +601,9 @@
             },
             warehouse,
             batchNo,
-            barcode,
-            chosen.barcode_uom || response.barcode_uom || ""
+            chosen.barcode_uom || (
+                normalized.isTemplate ? "" : response.barcode_uom || ""
+            )
         );
 
         frappe.show_alert({
@@ -662,7 +617,7 @@
     }
 
     // --------------------------------------------------------
-    // SCANNER PATCH — STANDARD SALES INVOICE ONLY
+    // STANDARD DESK SALES INVOICE SCANNER ONLY
     // --------------------------------------------------------
 
     function installScannerHook() {
@@ -676,9 +631,7 @@
             return false;
         }
 
-        if (prototype[PATCH_FLAG]) {
-            return true;
-        }
+        if (prototype[PATCH_FLAG]) return true;
 
         const original = prototype.process_scan;
 
@@ -689,7 +642,7 @@
                 return original.apply(this, args);
             }
 
-            if (frm.__styleToneBatchV82Busy) {
+            if (frm.__styleToneBatchV83Busy) {
                 return Promise.resolve();
             }
 
@@ -704,11 +657,9 @@
                 return original.apply(this, args);
             }
 
-            frm.__styleToneBatchV82Busy = true;
+            frm.__styleToneBatchV83Busy = true;
 
-            if (field?.$input) {
-                field.$input.val("");
-            }
+            if (field?.$input) field.$input.val("");
 
             if (frm.doc.scan_barcode) {
                 frm.doc.scan_barcode = "";
@@ -726,7 +677,7 @@
                     return false;
                 })
                 .finally(() => {
-                    frm.__styleToneBatchV82Busy = false;
+                    frm.__styleToneBatchV83Busy = false;
                     frm.refresh_field("items");
                 });
         };
@@ -737,7 +688,7 @@
         });
 
         console.info(
-            "[STYLETONE] Sales Invoice Batch V8.2 scanner installed."
+            "[STYLETONE] Sales Invoice Batch V8.3 scanner installed."
         );
 
         return true;
@@ -750,7 +701,7 @@
     });
 
     window.StyleToneSalesInvoiceBatch = {
-        version: "8.2",
+        version: "8.3",
         processBarcode,
         lookupBarcode,
         installScannerHook,
@@ -760,5 +711,4 @@
     };
 
     installScannerHook();
-
 })();
