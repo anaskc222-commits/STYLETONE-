@@ -1,10 +1,15 @@
+
 /* STYLETONE - ERPNext v16 Quotation Barcode / Batch / Price */
 
 (() => {
     "use strict";
 
+    const VERSION = "16.1";
     const PREFIX = "[STYLETONE Quotation Batch]";
-    const PATCH_FLAG = "__styleToneQuotationBatchV16";
+    const PATCH_FLAG = "__styleToneQuotationBatchV161";
+
+    if (window.__styleToneQuotationBatchV161Loaded) return;
+    window.__styleToneQuotationBatchV161Loaded = true;
 
     const SCAN_METHOD =
         "my_custom_app.quotation_batch.scan_barcode_with_variants";
@@ -141,12 +146,6 @@
 
             let finished = false;
 
-            function finish(value) {
-                if (finished) return;
-                finished = true;
-                resolve(value);
-            }
-
             const dialog = new frappe.ui.Dialog({
                 title: __(title),
                 size: "large",
@@ -155,6 +154,12 @@
                     fieldtype: "HTML"
                 }]
             });
+
+            function finish(value) {
+                if (finished) return;
+                finished = true;
+                resolve(value);
+            }
 
             const headers = columns.map(column =>
                 `<th>${esc(column.label)}</th>`
@@ -210,7 +215,7 @@
             `);
 
             dialog.fields_dict.selection_table.$wrapper.on(
-                "click.styleToneQuotationV16",
+                "click.styleToneQuotationV161",
                 ".st-select",
                 function () {
                     const index = Number(
@@ -223,10 +228,10 @@
             );
 
             dialog.$wrapper.on(
-                "hidden.bs.modal.styleToneQuotationV16",
+                "hidden.bs.modal.styleToneQuotationV161",
                 () => {
                     finish(null);
-                    dialog.$wrapper.off(".styleToneQuotationV16");
+                    dialog.$wrapper.off(".styleToneQuotationV161");
                 }
             );
 
@@ -273,17 +278,27 @@
 
         if (!warehouse) {
             frappe.msgprint(
-                __("Select a Warehouse before scanning.")
+                __("Select a Warehouse before selecting a batch.")
             );
             return null;
         }
 
-        const batches = await serverCall(BATCH_METHOD, {
+        const result = await serverCall(BATCH_METHOD, {
             item_code: itemCode,
             warehouse
         });
 
-        if (!Array.isArray(batches) || !batches.length) {
+        const batches = (Array.isArray(result) ? result : [])
+            .filter(batch =>
+                batch?.batch_no &&
+                Number(
+                    batch.available_qty ??
+                    batch.qty ??
+                    0
+                ) > 0
+            );
+
+        if (!batches.length) {
             notify(
                 `No positive-quantity batches are available for ${itemCode}.`,
                 "orange"
@@ -297,7 +312,10 @@
             [
                 { field: "batch_no", label: __("Batch No") },
                 { field: "expiry_date", label: __("Expiry Date") },
-                { field: "available_qty", label: __("Available Qty") }
+                {
+                    field: "available_qty",
+                    label: __("Available Qty")
+                }
             ]
         );
     }
@@ -425,19 +443,14 @@
 
     // -----------------------------------------------------
     // ENFORCE BATCH PRICE
-    //
-    // The delayed application is important when an ERPNext
-    // quantity or totals handler updates the rate afterwards.
     // -----------------------------------------------------
 
     async function enforcePrice(row, priceResult) {
         const finalRate = getPriceListRate(priceResult);
         const doctype = row.doctype;
         const name = row.name;
-
-        // Remove a standard discount from the previous item-rate
-        // calculation so it cannot silently change the chosen rate.
         const meta = frappe.get_meta(doctype);
+
         const hasField = field =>
             meta.fields.some(df => df.fieldname === field);
 
@@ -461,7 +474,6 @@
             doctype, name, "rate", finalRate
         );
 
-        // Give pending ERPNext field handlers time to finish.
         await delay(150);
 
         const currentRow = locals[doctype]?.[name];
@@ -472,7 +484,6 @@
             );
         }
 
-        // Final direct assignment after model handlers.
         currentRow.price_list_rate = finalRate;
         currentRow.rate = finalRate;
 
@@ -512,8 +523,6 @@
             );
         }
 
-        // Same item + same batch + same warehouse reuses one row.
-        // A different batch always gets a separate row.
         const existing = (frm.doc.items || []).find(row =>
             row.item_code === itemCode &&
             String(row[BATCH_FIELD] || "") === String(batchNo) &&
@@ -535,12 +544,9 @@
                 );
             }
 
-            // Restore the selected batch before recalculating.
             existing[BATCH_FIELD] = batchNo;
             existing.warehouse = warehouse;
 
-            // Calculate totals, enforce price, recalculate totals again,
-            // then enforce once more to prevent rate overwrite.
             await recalculateTotals(frm);
             await enforcePrice(existing, priceResult);
 
@@ -556,7 +562,6 @@
             return existing;
         }
 
-        // Reuse an empty row if possible, otherwise create one.
         let row = (frm.doc.items || []).find(child =>
             !child.item_code && !child[BATCH_FIELD]
         );
@@ -594,6 +599,180 @@
 
         return row;
     }
+
+    // -----------------------------------------------------
+    // MANUAL ITEM SELECTION — QUOTATION
+    // Select batch and apply the matching batch price.
+    // -----------------------------------------------------
+
+    async function handleManualQuotationItem(frm, cdt, cdn) {
+        if (!supported(frm) || processing) return;
+
+        const row = locals[cdt]?.[cdn];
+        if (!row?.item_code) return;
+
+        const itemCode = String(row.item_code).trim();
+
+        if (
+            row.__styleToneManualBatchBusy ||
+            row.__styleToneBatchHandledFor === itemCode
+        ) {
+            return;
+        }
+
+        row.__styleToneManualBatchBusy = true;
+
+        try {
+            // Let ERPNext populate standard item details first.
+            await delay(350);
+
+            if (
+                !supported(frm) ||
+                processing ||
+                String(row.item_code || "").trim() !== itemCode
+            ) {
+                return;
+            }
+
+            const itemResult = await frappe.db.get_value(
+                "Item",
+                itemCode,
+                [
+                    "name",
+                    "disabled",
+                    "has_variants",
+                    "variant_of",
+                    "has_batch_no",
+                    "is_stock_item"
+                ]
+            );
+
+            const item = itemResult?.message;
+
+            if (!item?.name || Number(item.disabled) === 1) {
+                return;
+            }
+
+            // Do not handle an item template as a stock item.
+            if (
+                Number(item.has_variants) === 1 &&
+                !item.variant_of
+            ) {
+                return;
+            }
+
+            // Preserve standard ERPNext handling for non-batch items.
+            if (Number(item.has_batch_no) !== 1) {
+                row.__styleToneBatchHandledFor = itemCode;
+                return;
+            }
+
+            // Avoid opening the picker again if a batch is assigned.
+            if (String(row[BATCH_FIELD] || "").trim()) {
+                row.__styleToneBatchHandledFor = itemCode;
+                return;
+            }
+
+            const warehouse = getWarehouse(frm);
+
+            if (!warehouse) {
+                frappe.msgprint({
+                    title: __("Warehouse Required"),
+                    message: __(
+                        "Select a Warehouse before selecting a batch."
+                    ),
+                    indicator: "orange"
+                });
+                return;
+            }
+
+            const selectedBatch = await chooseBatch(frm, itemCode);
+
+            if (!selectedBatch?.batch_no) {
+                // Keep the user's item selection; no batch was assigned.
+                return;
+            }
+
+            if (String(row.item_code || "").trim() !== itemCode) {
+                return;
+            }
+
+            // Fetch the same standard details and price used by barcode flow.
+            const details = await getStandardItemDetails(
+                frm,
+                itemCode,
+                selectedBatch.batch_no
+            );
+
+            const uom =
+                details.uom ||
+                details.stock_uom ||
+                row.uom ||
+                "";
+
+            const priceResult = await getBatchPrice(
+                frm,
+                itemCode,
+                selectedBatch.batch_no,
+                uom
+            );
+
+            if (String(row.item_code || "").trim() !== itemCode) {
+                return;
+            }
+
+            // Keep the existing row; do not add a duplicate item row.
+            applyDetailsToRow(row, details);
+
+            row.item_code = itemCode;
+            row.warehouse = warehouse;
+
+            await frappe.model.set_value(
+                cdt,
+                cdn,
+                BATCH_FIELD,
+                selectedBatch.batch_no
+            );
+
+            row[BATCH_FIELD] = selectedBatch.batch_no;
+
+            await recalculateTotals(frm);
+            await enforcePrice(row, priceResult);
+
+            await recalculateTotals(frm);
+            await enforcePrice(row, priceResult);
+
+            // Reassert custom batch field after standard calculations.
+            row[BATCH_FIELD] = selectedBatch.batch_no;
+            row.warehouse = warehouse;
+            row.__styleToneBatchHandledFor = itemCode;
+
+            frm.refresh_field("items");
+            frm.dirty();
+
+            if (priceResult.found) {
+                notify(
+                    `Batch ${selectedBatch.batch_no} selected for ${itemCode}. Price ${getPriceListRate(priceResult)} applied.`
+                );
+            } else {
+                notify(
+                    `Batch ${selectedBatch.batch_no} selected for ${itemCode}, but no matching Item Price was found; rate set to 0.`,
+                    "orange"
+                );
+            }
+
+        } catch (error) {
+            showError(error);
+        } finally {
+            row.__styleToneManualBatchBusy = false;
+        }
+    }
+
+    frappe.ui.form.on("Quotation Item", {
+        item_code(frm, cdt, cdn) {
+            handleManualQuotationItem(frm, cdt, cdn);
+        }
+    });
 
     // -----------------------------------------------------
     // MAIN BARCODE FLOW
@@ -662,19 +841,22 @@
 
             const item = itemResult?.message;
 
-            if (!item || item.disabled) {
+            if (!item || Number(item.disabled) === 1) {
                 throw new Error(
                     `Item ${itemCode} is missing or disabled.`
                 );
             }
 
-            if (item.has_variants && !item.variant_of) {
+            if (
+                Number(item.has_variants) === 1 &&
+                !item.variant_of
+            ) {
                 throw new Error(
                     `${itemCode} is a template. Select a concrete variant.`
                 );
             }
 
-            if (!item.is_stock_item) {
+            if (Number(item.is_stock_item) !== 1) {
                 throw new Error(
                     `${itemCode} is not a stock item.`
                 );
@@ -691,7 +873,9 @@
             const batchNo = selectedBatch?.batch_no || "";
 
             const details = await getStandardItemDetails(
-                frm, itemCode, batchNo
+                frm,
+                itemCode,
+                batchNo
             );
 
             const priceUom =
@@ -700,7 +884,10 @@
                 "";
 
             const priceResult = await getBatchPrice(
-                frm, itemCode, batchNo, priceUom
+                frm,
+                itemCode,
+                batchNo,
+                priceUom
             );
 
             console.info(`${PREFIX} price result`, {
@@ -732,6 +919,7 @@
                     "orange"
                 );
             }
+
         } catch (error) {
             showError(error);
         } finally {
@@ -789,7 +977,7 @@
 
             processBarcode(frm, barcode).catch(showError);
 
-            // Do not allow the standard scanner to add a duplicate row.
+            // Prevent standard scanner processing from adding a duplicate row.
             return Promise.resolve();
         };
 
@@ -799,7 +987,7 @@
         });
 
         console.info(
-            `${PREFIX} Quotation scanner connected (V16).`
+            `${PREFIX} Quotation scanner connected (V${VERSION}).`
         );
 
         return true;
@@ -812,6 +1000,7 @@
     });
 
     window.StyleToneQuotationBatch = {
+        version: VERSION,
         processBarcode,
         installScannerPatch
     };
