@@ -141,7 +141,7 @@
                 )
                 .map((variant) => ({
                     label:
-                        `${variant.item_code} — ` +
+                        `${variant.item_code} - ` +
                         `${variant.item_name || variant.item_code} ` +
                         `(Available: ${variant.available_qty ?? variant.qty})`,
                     value: variant.item_code
@@ -312,14 +312,6 @@
         warehouse,
         batchNo
     ) {
-        /*
-         * ERPNext v16 expects the context under the parameter
-         * named "ctx", not "args".
-         *
-         * Send ctx as a JSON string for Frappe's RPC argument
-         * parser, and pass the current Quotation document.
-         */
-
         const ctx = {
             doctype: "Quotation",
             item_code: itemCode,
@@ -383,10 +375,8 @@
 
     function findReusableRow(frm, itemCode, batchNo) {
         const items = frm.doc.items || [];
-
         const normalizedBatch = String(batchNo || "");
 
-        // Reuse a row only when both item and batch match.
         const matchingRow = items.find((row) => {
             const rowBatch = String(
                 row.batch_no ||
@@ -407,7 +397,6 @@
             };
         }
 
-        // Prefer an unused blank row.
         const blankRow = items.find((row) =>
             !row.item_code
         );
@@ -442,7 +431,6 @@
             batchNo
         );
 
-        // Same item and same batch: increase quantity.
         if (match.row && match.existing) {
             const row = match.row;
             const currentQty = Number(row.qty || 0);
@@ -488,11 +476,6 @@
             row = frm.add_child("items");
         }
 
-        /*
-         * Set item_code first, then apply the standard details
-         * returned by ERPNext. Exclude identity, quantity and
-         * batch fields from this generic assignment.
-         */
         row.item_code = itemCode;
 
         const excludedFields = new Set([
@@ -528,7 +511,6 @@
             );
         }
 
-        // Explicitly enforce the selected warehouse and quantity.
         if (hasChildField("warehouse")) {
             promises.push(
                 setChildValue(
@@ -598,7 +580,6 @@
         }
 
         try {
-            // 1. Resolve the scanned barcode.
             const scanResponse = await frappe.call({
                 method: SCAN_METHOD,
                 args: {
@@ -617,7 +598,6 @@
 
             let itemCode = result.item_code;
 
-            // 2. If this is a template, ask for the variant.
             if (
                 result.is_template ||
                 Array.isArray(result.variants)
@@ -647,12 +627,10 @@
                 );
             }
 
-            // 3. Validate the selected variant/item.
             const item = await getItemInfo(itemCode);
 
             let batchNo = "";
 
-            // 4. If batch-controlled, show the batch selector.
             if (Number(item.has_batch_no)) {
                 const batchResponse = await frappe.call({
                     method: BATCH_METHOD,
@@ -685,7 +663,6 @@
                 if (!batchNo) return;
             }
 
-            // 5. Fetch standard ERPNext item details using ctx.
             const details = await fetchCoreItemDetails(
                 frm,
                 itemCode,
@@ -693,7 +670,6 @@
                 batchNo
             );
 
-            // 6. Add the item or increment the matching row.
             await applyItemDetails(
                 frm,
                 itemCode,
@@ -792,7 +768,6 @@
 
             if (!barcode) return;
 
-            // Clear the input before processing the scan.
             frappe.model.set_value(
                 frm.doctype,
                 frm.docname,
@@ -804,6 +779,5 @@
         }
     });
 
-    // Attempt installation after this script loads.
     installScannerPatch();
 })();
