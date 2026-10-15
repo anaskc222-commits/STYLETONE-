@@ -2,7 +2,7 @@
 import frappe
 
 
-SOURCE_FIELD = "custom_source_quotation",
+SOURCE_FIELD = "custom_source_quotation"
 
 
 def _has_submitted_sales_order(quotation_name):
