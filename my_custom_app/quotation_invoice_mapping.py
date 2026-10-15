@@ -33,7 +33,7 @@ ITEM_PRICE_FIELDS = (
     "margin_rate_or_amount",
 )
 
-DIRECT_QUOTATION_FIELD = "custom_source_quotation_",
+DIRECT_QUOTATION_FIELD = "custom_source_quotation_"
 
 
 def _copy_header_values(source, target):
