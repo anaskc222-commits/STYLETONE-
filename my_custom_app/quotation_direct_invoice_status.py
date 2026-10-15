@@ -2,11 +2,11 @@
 import frappe
 
 
-SOURCE_FIELD = "custom_source_quotation"
+SOURCE_FIELD = "custom_source_quotation_"
 
 
 def _has_submitted_sales_order(quotation_name):
-    """Use ERPNext's existing Quotation-to-Sales-Order links."""
+    """Check whether a submitted Sales Order references this Quotation."""
     return bool(
         frappe.db.exists(
             "Sales Order Item",
@@ -19,9 +19,9 @@ def _has_submitted_sales_order(quotation_name):
 
 
 def _has_submitted_direct_invoice(quotation_name, exclude_invoice=None):
-    """Find submitted invoices explicitly linked by the direct mapper."""
+    """Find submitted direct invoices linked to this Quotation."""
     filters = {
-        SOURCE_FIELD = "custom_source_quotation_"
+        SOURCE_FIELD: quotation_name,
         "docstatus": 1,
         "is_return": 0,
     }
@@ -45,12 +45,11 @@ def _refresh_direct_invoice_status(
 
     quotation = frappe.get_doc("Quotation", quotation_name)
 
-    # Never alter a cancelled or draft Quotation.
+    # Never change a draft or cancelled Quotation.
     if quotation.docstatus != 1:
         return
 
-    # Logic 1 remains ERPNext-managed.
-    # If a submitted Sales Order exists, let standard status handling win.
+    # Preserve ERPNext's normal Sales Order status handling.
     if _has_submitted_sales_order(quotation_name):
         quotation.set_status(update=True)
         return
@@ -59,7 +58,7 @@ def _refresh_direct_invoice_status(
         # The current invoice is being submitted.
         has_invoice = True
     else:
-        # On cancellation, ignore the invoice being cancelled.
+        # On cancellation, exclude the invoice being cancelled.
         has_invoice = _has_submitted_direct_invoice(
             quotation_name,
             exclude_invoice=current_invoice,
@@ -74,11 +73,12 @@ def _refresh_direct_invoice_status(
             update_modified=False,
         )
     else:
-        # No remaining direct invoice: restore ERPNext's calculated status.
+        # Restore ERPNext's calculated status if no direct invoice remains.
         quotation.set_status(update=True)
 
 
 def on_sales_invoice_submit(doc, method=None):
+    """Update the source Quotation when a direct invoice is submitted."""
     if doc.get(SOURCE_FIELD) and not doc.get("is_return"):
         _refresh_direct_invoice_status(
             doc.get(SOURCE_FIELD),
@@ -88,6 +88,7 @@ def on_sales_invoice_submit(doc, method=None):
 
 
 def on_sales_invoice_cancel(doc, method=None):
+    """Recalculate the source Quotation when a direct invoice is cancelled."""
     if doc.get(SOURCE_FIELD) and not doc.get("is_return"):
         _refresh_direct_invoice_status(
             doc.get(SOURCE_FIELD),
@@ -98,9 +99,8 @@ def on_sales_invoice_cancel(doc, method=None):
 
 def ensure_direct_invoice_status(doc, method=None):
     """
-    ERPNext recalculates Quotation.status during validation.
-    Restore Invoiced after saving only when a direct invoice exists
-    and no submitted Sales Order link takes precedence.
+    Restore Invoiced after a Quotation update when a submitted direct invoice
+    exists and the normal Sales Order flow does not take precedence.
     """
     if doc.docstatus != 1:
         return
