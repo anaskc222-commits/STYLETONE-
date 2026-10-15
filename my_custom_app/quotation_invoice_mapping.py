@@ -1,3 +1,4 @@
+
 import frappe
 from frappe import _
 
@@ -31,6 +32,8 @@ ITEM_PRICE_FIELDS = (
     "margin_type",
     "margin_rate_or_amount",
 )
+
+DIRECT_QUOTATION_FIELD = "custom_source_quotation"
 
 
 def _copy_header_values(source, target):
@@ -131,6 +134,14 @@ def make_sales_invoice_preserve_quotation_pricing(
         args=args,
     )
 
+    # --------------------------------------------------------
+    # LOGIC 2 ONLY:
+    # Preserve the source Quotation for direct invoicing.
+    # Requires a Link field to Quotation on Sales Invoice.
+    # --------------------------------------------------------
+    if invoice.meta.has_field(DIRECT_QUOTATION_FIELD):
+        invoice.set(DIRECT_QUOTATION_FIELD, quotation.name)
+
     # Restore the Quotation's Price List and discount settings.
     _copy_header_values(quotation, invoice)
 
@@ -145,6 +156,7 @@ def make_sales_invoice_preserve_quotation_pricing(
 
 # ------------------------------------------------------------
 # QUOTATION -> SALES ORDER
+# EXISTING LOGIC — UNCHANGED
 # ------------------------------------------------------------
 
 @frappe.whitelist()
