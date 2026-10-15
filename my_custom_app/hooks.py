@@ -56,6 +56,10 @@ doc_events = {
             "my_custom_app.update_Pricelist.transaction_pricing."
             "validate_discount_limit"
         ),
+        "on_update": (
+            "my_custom_app.quotation_direct_invoice_status."
+            "ensure_direct_invoice_status"
+        ),
     },
 
     "Sales Order": {
@@ -69,6 +73,14 @@ doc_events = {
         "validate": (
             "my_custom_app.update_Pricelist.transaction_pricing."
             "validate_discount_limit"
+        ),
+        "on_submit": (
+            "my_custom_app.quotation_direct_invoice_status."
+            "on_sales_invoice_submit"
+        ),
+        "on_cancel": (
+            "my_custom_app.quotation_direct_invoice_status."
+            "on_sales_invoice_cancel"
         ),
     },
 }
