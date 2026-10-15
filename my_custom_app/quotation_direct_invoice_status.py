@@ -21,7 +21,7 @@ def _has_submitted_sales_order(quotation_name):
 def _has_submitted_direct_invoice(quotation_name, exclude_invoice=None):
     """Find submitted invoices explicitly linked by the direct mapper."""
     filters = {
-        SOURCE_FIELD: quotation_name,
+        SOURCE_FIELD = "custom_source_quotation_"
         "docstatus": 1,
         "is_return": 0,
     }
