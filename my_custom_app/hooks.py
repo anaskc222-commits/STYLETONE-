@@ -1,4 +1,3 @@
-
 app_name = "my_custom_app"
 app_title = "STYLETONE"
 app_publisher = "STYLETONE"
@@ -6,17 +5,19 @@ app_description = "STYLETONE custom Frappe application"
 app_email = "your-email@example.com"
 app_license = "MIT"
 
+# Ensure pos_next is loaded before my_custom_app
+required_apps = ["pos_next"]
 
+# Client-Side Form Scripts
 doctype_js = {
     "Sales Invoice": "public/js/sales_invoice_batch.js",
-
     "Quotation": [
         "public/js/quotation_batch.js",
         "public/js/quotation_sales_invoice.js",
     ],
 }
 
-
+# Server-Side Document Event Hooks
 doc_events = {
     "Item Price": {
         "after_insert": (
@@ -28,7 +29,6 @@ doc_events = {
             "on_item_price_change"
         ),
     },
-
     "Purchase Invoice": {
         "on_submit": (
             "my_custom_app.update_Pricelist.dispatcher."
@@ -39,7 +39,6 @@ doc_events = {
             "on_purchase_invoice_submit"
         ),
     },
-
     "Pricing Rule": {
         "after_insert": (
             "my_custom_app.PRICELISTFOR_PRICING_RULE.dispatcher."
@@ -50,7 +49,6 @@ doc_events = {
             "trigger_from_pricing_rule"
         ),
     },
-
     "Quotation": {
         "validate": (
             "my_custom_app.update_Pricelist.transaction_pricing."
@@ -61,14 +59,12 @@ doc_events = {
             "ensure_direct_invoice_status"
         ),
     },
-
     "Sales Order": {
         "validate": (
             "my_custom_app.update_Pricelist.transaction_pricing."
             "validate_discount_limit"
         ),
     },
-
     "Sales Invoice": {
         "validate": (
             "my_custom_app.update_Pricelist.transaction_pricing."
