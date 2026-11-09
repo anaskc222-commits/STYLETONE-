@@ -1,3 +1,4 @@
+
 frappe.provide("my_custom_app.store_day_book");
 
 frappe.pages["store-day-book"].on_page_load = function (wrapper) {
