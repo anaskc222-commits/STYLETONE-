@@ -1,0 +1,29 @@
+.store-day-book {
+        padding-bottom: 2rem;
+}
+.store-day-book .sdb-card {
+        background: var(--card-bg);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        box-shadow: var(--shadow-base);
+        padding: 15px;
+        margin-bottom: 1rem;
+}
+.store-day-book .sdb-filter-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 1rem;
+        margin-bottom: 10px;
+}
+.store-day-book .sdb-preset-row {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        border-top: 1px solid var(--border-color);
+        padding-top: 10px;
+}
+.store-day-book .sdb-preset.active {
+        background-color: var(--primary);
+        color: var(--text-on-primary);
+        border-color: var(--primary);
+}
