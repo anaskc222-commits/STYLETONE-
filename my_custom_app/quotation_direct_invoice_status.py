@@ -1,6 +1,4 @@
-
 import frappe
-
 
 SOURCE_FIELD = "custom_source_quotation_"
 
@@ -99,9 +97,10 @@ def on_sales_invoice_cancel(doc, method=None):
 
 def ensure_direct_invoice_status(doc, method=None):
     """
-    Restore Invoiced after a Quotation update when a submitted direct invoice
+    Ensure status is set to Invoiced before saving if a submitted direct invoice
     exists and the normal Sales Order flow does not take precedence.
     """
+    # Only apply to submitted quotations
     if doc.docstatus != 1:
         return
 
@@ -110,10 +109,6 @@ def ensure_direct_invoice_status(doc, method=None):
 
     if _has_submitted_direct_invoice(doc.name):
         if doc.status != "Invoiced":
-            frappe.db.set_value(
-                "Quotation",
-                doc.name,
-                "status",
-                "Invoiced",
-                update_modified=False,
-            )
+            # Mutate the document attribute directly in memory so Frappe saves it cleanly
+            # without triggering out-of-sync database write desynchronization.
+            doc.status = "Invoiced"
