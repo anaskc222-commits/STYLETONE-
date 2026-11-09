@@ -1,5 +1,6 @@
 # apps/my_custom_app/my_custom_app/dashboard.py
 
+
 import frappe
 from frappe import _
 from frappe.utils import add_months, getdate, nowdate
