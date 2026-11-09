@@ -5,8 +5,9 @@ app_description = "STYLETONE custom Frappe application"
 app_email = "your-email@example.com"
 app_license = "MIT"
 
-# Ensure pos_next is loaded before my_custom_app
-required_apps = ["pos_next"]
+# Left empty because pos_next is already installed locally on the bench,
+# preventing GitHub remote resolution errors during app installation.
+required_apps = []
 
 # Client-Side Form Scripts
 doctype_js = {
