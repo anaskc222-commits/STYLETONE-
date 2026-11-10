@@ -7,8 +7,8 @@ on:
   pull_request:
 
 concurrency:
-  group: version-16-my_custom_app-${{ github.event.number }}
-  cancel-in-progress: true
+  group: version-16-my_custom_app-${{ github.head_ref || github.ref }}
+  cancel-in-progress: false
 
 jobs:
   tests:
