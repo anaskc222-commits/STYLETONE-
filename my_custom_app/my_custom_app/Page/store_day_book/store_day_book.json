@@ -20,6 +20,8 @@
   },
   {
    "role": "System Manager"
+  },
+  { "role": "Sales User" 
   }
  ],
  "script": null,
