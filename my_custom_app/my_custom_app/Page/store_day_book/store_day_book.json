@@ -1,0 +1,29 @@
+{
+ "content": null,
+ "creation": "2026-08-19 10:00:00.000000",
+ "docstatus": 0,
+ "doctype": "Page",
+ "icon": "fa fa-bar-chart",
+ "idx": 0,
+ "modified": "2026-08-19 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POS Next",
+ "name": "store-day-book",
+ "owner": "Administrator",
+ "page_name": "store-day-book",
+ "roles": [
+  {
+   "role": "POS Manager"
+  },
+  {
+   "role": "Accounts Manager"
+  },
+  {
+   "role": "System Manager"
+  }
+ ],
+ "script": null,
+ "standard": "Yes",
+ "style": null,
+ "title": "Store Day Book"
+}
