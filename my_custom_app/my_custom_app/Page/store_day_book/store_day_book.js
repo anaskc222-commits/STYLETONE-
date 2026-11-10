@@ -21,6 +21,7 @@ frappe.pages["store-day-book"].on_page_show = function (wrapper) {
                 day_book.first_show = false;
                 return;
         }
+
         day_book.refresh();
 };
 
@@ -61,11 +62,18 @@ my_custom_app.store_day_book.StoreDayBook = class StoreDayBook {
         }
 
         make_actions() {
-                this.page.set_primary_action(__("Refresh"), () => this.refresh(), "refresh");
+                this.page.set_primary_action(
+                        __("Refresh"),
+                        () => this.refresh(),
+                        "refresh"
+                );
+
                 this.page.add_menu_item(__("Export Day Book (CSV)"), () => this.export_ledger());
                 this.page.add_menu_item(__("Export POS Expenses (CSV)"), () => this.export_expenses());
-                this.page.add_menu_item(__("Print Report"), () => window.print());
+                this.page.add_menu_item(__("Print Dashboard"), () => window.print());
         }
+
+        // ---------------------------------------------------------------- filters
 
         make_filters() {
                 const $card = $(`
@@ -78,6 +86,7 @@ my_custom_app.store_day_book.StoreDayBook = class StoreDayBook {
                 const $grid = $card.find(".sdb-filter-grid");
                 const refresh = frappe.utils.debounce(() => this.refresh(), 250);
 
+                // Role-based 2-month boundary restriction check
                 const is_unrestricted = frappe.user.has_role(["System Manager", "Accounts Manager"]);
                 let min_allowed_date = null;
                 let max_allowed_date = null;
@@ -155,6 +164,7 @@ my_custom_app.store_day_book.StoreDayBook = class StoreDayBook {
 
                 fields.forEach((df) => {
                         const $slot = $('<div class="sdb-filter"></div>').appendTo($grid);
+
                         this.controls[df.fieldname] = frappe.ui.form.make_control({
                                 df: Object.assign({}, df, {
                                         onchange: () => {
@@ -170,6 +180,7 @@ my_custom_app.store_day_book.StoreDayBook = class StoreDayBook {
                                 parent: $slot,
                                 render_input: true,
                         });
+
                         if (df.default !== undefined) {
                                 this.controls[df.fieldname].set_value(df.default);
                         }
@@ -184,11 +195,13 @@ my_custom_app.store_day_book.StoreDayBook = class StoreDayBook {
                                 .appendTo($row)
                                 .on("click", () => this.apply_preset(preset.key));
                 });
+
                 this.apply_preset("today", true);
         }
 
         preset_range(key) {
                 const day = (m) => m.format("YYYY-MM-DD");
+
                 switch (key) {
                         case "yesterday": {
                                 const d = day(moment().subtract(1, "days"));
@@ -225,6 +238,7 @@ my_custom_app.store_day_book.StoreDayBook = class StoreDayBook {
 
         apply_preset(key, silent) {
                 const range = this.preset_range(key);
+
                 this.controls.from_date.set_value(range.from_date);
                 this.controls.to_date.set_value(range.to_date);
                 this.sync_active_preset();
@@ -284,19 +298,24 @@ my_custom_app.store_day_book.StoreDayBook = class StoreDayBook {
                 return filters;
         }
 
+        // ---------------------------------------------------------------- refresh
+
         refresh() {
                 if (!this.controls.from_date) return;
+
                 const request_id = ++this.request_id;
 
-                frappe.call({
-                        method: "my_custom_app.dashboard.get_store_day_book",
-                        args: { filters: this.get_filters() },
-                        freeze: true,
-                        freeze_message: __("Crunching store metrics..."),
-                }).then((r) => {
-                        if (request_id !== this.request_id || !r.message) return;
-                        this.render(r.message);
-                });
+                frappe
+                        .call({
+                                method: "my_custom_app.dashboard.get_store_day_book",
+                                args: { filters: this.get_filters() },
+                                freeze: true,
+                                freeze_message: __("Crunching store metrics..."),
+                        })
+                        .then((r) => {
+                                if (request_id !== this.request_id || !r.message) return;
+                                this.render(r.message);
+                        });
         }
 
         render(data) {
@@ -310,6 +329,8 @@ my_custom_app.store_day_book.StoreDayBook = class StoreDayBook {
                 this.render_ledger(data.ledger);
                 this.render_shifts(data.shifts);
         }
+
+        // ------------------------------------------------------------------- KPIs
 
         render_kpis(kpis) {
                 this.$kpis.empty();
@@ -337,7 +358,10 @@ my_custom_app.store_day_book.StoreDayBook = class StoreDayBook {
                 const arrow = up ? "&#9650;" : "&#9660;";
 
                 return `<span class="${cls}">${arrow} ${Math.abs(kpi.delta_pct).toFixed(1)}%</span>
-                        <span class="sdb-delta-prev">${__("vs")} ${this.format_value(kpi.prev_value, kpi.fieldtype)}</span>`;
+                        <span class="sdb-delta-prev">${__("vs")} ${this.format_value(
+                                kpi.prev_value,
+                                kpi.fieldtype
+                        )}</span>`;
         }
 
         format_value(value, fieldtype) {
@@ -387,6 +411,8 @@ my_custom_app.store_day_book.StoreDayBook = class StoreDayBook {
                 frappe.set_route("List", "Sales Invoice", route_filters);
         }
 
+        // ----------------------------------------------------------------- charts
+
         render_charts(data) {
                 this.$charts.empty();
                 this.charts = {};
@@ -431,5 +457,54 @@ my_custom_app.store_day_book.StoreDayBook = class StoreDayBook {
                         },
                 });
 
-                this.make_chart("cashiers", __("Sales by Cashier"), "", {
-                        data: {
+                if (data.cashiers && data.cashiers.length) {
+                        this.make_chart("cashiers", __("Sales by Cashier"), "", {
+                                data: {
+                                        labels: data.cashiers.map((c) => c.label),
+                                        datasets: [{ values: data.cashiers.map((c) => c.value) }],
+                                },
+                                type: "bar",
+                                height: 260,
+                                colors: ["#2490ef"],
+                                axisOptions: { shortenYAxisNumbers: 1 },
+                                tooltipOptions: {
+                                        formatTooltipY: (value) => format_currency(value, this.currency),
+                                },
+                        });
+                }
+        }
+
+        make_chart(key, title, className, options) {
+                const $card = $(`<div class="sdb-card ${className || ""}">
+                        <div class="sdb-card-title">${title}</div>
+                        <div class="sdb-chart-container" data-chart-key="${key}"></div>
+                </div>`).appendTo(this.$charts);
+
+                options.parent = $card.find(".sdb-chart-container")[0];
+                this.charts[key] = new frappe.Chart(options.parent, options);
+        }
+
+        render_analysis(data) {
+                this.$analysis.empty();
+        }
+
+        render_expenses(expenses) {
+                this.$expenses.empty();
+        }
+
+        render_ledger(ledger) {
+                this.$ledger.empty();
+        }
+
+        render_shifts(shifts) {
+                this.$shifts.empty();
+        }
+
+        export_ledger() {
+                frappe.msgprint(__("Exporting Day Book ledger..."));
+        }
+
+        export_expenses() {
+                frappe.msgprint(__("Exporting POS expenses..."));
+        }
+};
